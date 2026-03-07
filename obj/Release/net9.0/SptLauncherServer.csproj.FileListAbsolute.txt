@@ -1,0 +1,12 @@
+F:\test\ZALUPA\SPT\Develop\SptLauncherServer\obj\Release\net9.0\SptLauncherServer.csproj.AssemblyReference.cache
+F:\test\ZALUPA\SPT\Develop\SptLauncherServer\obj\Release\net9.0\SptLauncherServer.GeneratedMSBuildEditorConfig.editorconfig
+F:\test\ZALUPA\SPT\Develop\SptLauncherServer\obj\Release\net9.0\SptLauncherServer.AssemblyInfoInputs.cache
+F:\test\ZALUPA\SPT\Develop\SptLauncherServer\obj\Release\net9.0\SptLauncherServer.AssemblyInfo.cs
+F:\test\ZALUPA\SPT\Develop\SptLauncherServer\obj\Release\net9.0\SptLauncherServer.csproj.CoreCompileInputs.cache
+F:\test\ZALUPA\SPT\Develop\SptLauncherServer\bin\Release\net9.0\SptLauncherServer.deps.json
+F:\test\ZALUPA\SPT\Develop\SptLauncherServer\bin\Release\net9.0\SptLauncherServer.dll
+F:\test\ZALUPA\SPT\Develop\SptLauncherServer\bin\Release\net9.0\SptLauncherServer.pdb
+F:\test\ZALUPA\SPT\Develop\SptLauncherServer\obj\Release\net9.0\SptLauncherServer.dll
+F:\test\ZALUPA\SPT\Develop\SptLauncherServer\obj\Release\net9.0\refint\SptLauncherServer.dll
+F:\test\ZALUPA\SPT\Develop\SptLauncherServer\obj\Release\net9.0\SptLauncherServer.pdb
+F:\test\ZALUPA\SPT\Develop\SptLauncherServer\obj\Release\net9.0\ref\SptLauncherServer.dll
