@@ -1,5 +1,5 @@
 @echo off
-cd /d F:\test\ZALUPA\SPT\Develop\SptLauncher
+cd /d "%~dp0"
 echo Starting SPT Launcher in dev mode...
 "C:\Program Files\nodejs\npm.cmd" run dev
 pause

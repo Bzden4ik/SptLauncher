@@ -17,10 +17,12 @@ namespace SptLauncherServer
 
         public Task OnLoad()
         {
-            _logger.Success("[SptLauncherServer] Loaded.");
+            var sptVer = Utils.SptVersionResolver.Resolve();
+            _logger.Success($"[SptLauncherServer] Loaded.  mod v1.1.0  SPT {sptVer}");
+            _logger.Info("[SptLauncherServer] Endpoint: GET /launcher/ping");
+            _logger.Info("[SptLauncherServer] Endpoint: GET /launcher/version");
             _logger.Info("[SptLauncherServer] Endpoint: GET /launcher/manifest");
-            _logger.Info("[SptLauncherServer] Files at:  /mods/plugins/<file.dll>");
-            _logger.Info("[SptLauncherServer] Files at:  /mods/patchers/<file.dll>");
+            _logger.Info("[SptLauncherServer] Files at:  GET /launcher/mods/<plugins|patchers>/<file>");
             return Task.CompletedTask;
         }
     }

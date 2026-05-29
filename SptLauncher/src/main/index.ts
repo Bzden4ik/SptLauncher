@@ -9,37 +9,94 @@ import * as https from 'https'
 import * as zlib from 'zlib'
 import axios from 'axios'
 
-const store = new Store()
+const store = new Store<any>()
 
-const SYNC_EXTENSIONS = ['.dll', '.cfg']
-const SYNC_BLACKLIST = ['Fika.Headless.dll', 'QuestMod.dll']
-
-const isBlacklisted = (filename: string) =>
-  SYNC_BLACKLIST.some(b => filename === b || filename.endsWith('/' + b))
+// Sync EVERY file inside BepInEx/plugins and BepInEx/patchers — dll, json, cfg,
+// asset bundles, nested folders, the lot. Only obvious OS/runtime junk is skipped.
+const IGNORE_FILES    = new Set(['desktop.ini', 'thumbs.db', '.ds_store'])
+const isIgnored       = (name: string) => IGNORE_FILES.has(name.toLowerCase())
+const APP_VERSION     = app.getVersion()
 
 // SPT использует самоподписанный сертификат
 const httpsAgent = new https.Agent({ rejectUnauthorized: false })
 const axiosInstance = axios.create({ httpsAgent })
 
+// ── Local hash cache (mtime+size keyed) ────────────────────────────────────
+// Re-hashing thousands of files on every scan is the bottleneck. We cache the
+// SHA-256 per absolute path and only recompute when mtime or size changes.
+type HashCacheEntry = { m: number; s: number; h: string }
+let hashCache: Record<string, HashCacheEntry> = {}
+let hashCacheDirty = false
+function hashCachePath(): string { return path.join(app.getPath('userData'), 'hashcache.json') }
+function loadHashCache(): void {
+  try { hashCache = JSON.parse(fs.readFileSync(hashCachePath(), 'utf8')) } catch { hashCache = {} }
+}
+function saveHashCache(): void {
+  if (!hashCacheDirty) return
+  try { fs.writeFileSync(hashCachePath(), JSON.stringify(hashCache)); hashCacheDirty = false } catch {}
+}
+function hashFileCached(full: string, st: fs.Stats): string {
+  const c = hashCache[full]
+  if (c && c.m === st.mtimeMs && c.s === st.size) return c.h
+  const h = crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex')
+  hashCache[full] = { m: st.mtimeMs, s: st.size, h }
+  hashCacheDirty = true
+  return h
+}
+
+// ── Convergence.mp3 resolver ───────────────────────────────────────────────
+function getTrackPath(): string {
+  if (app.isPackaged) {
+    return join(process.resourcesPath, 'Convergence.mp3')
+  }
+  return join(__dirname, '..', '..', 'resources', 'Convergence.mp3')
+}
+
+function getUserBlacklist(): string[] {
+  const v = store.get('skippedMods')
+  return Array.isArray(v) ? v as string[] : []
+}
+
+function isSkipped(folder: string, filename: string): boolean {
+  const key = `${folder}/${filename}`
+  return getUserBlacklist().includes(key)
+}
+
+// Per-client runtime data protection (mirror of shared/types defaults). Files
+// matching are never downloaded/overwritten/deleted — a last-line guard so a
+// renderer bug can't clobber a save.
+const DEFAULT_PROTECTED_PATTERNS = [
+  '*savedata*', '*save_data*', '*_save.json', '*.sav', '*.save',
+  '*playerdata*', '*player_data*', '*userdata*', '*user_data*'
+]
+function getProtectedPatterns(): string[] {
+  const v = store.get('protectedPatterns')
+  return Array.isArray(v) && v.length ? v as string[] : DEFAULT_PROTECTED_PATTERNS
+}
+function globToRegex(glob: string): RegExp {
+  const esc = (s: string) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp('^' + glob.split('*').map(esc).join('.*') + '$', 'i')
+}
+function isProtectedName(filename: string): boolean {
+  const i = filename.lastIndexOf('/')
+  const base = i >= 0 ? filename.slice(i + 1) : filename
+  return getProtectedPatterns().some(p => {
+    const target = p.includes('/') ? filename : base
+    try { return globToRegex(p).test(target) } catch { return false }
+  })
+}
+
+// ── SPT response helpers ───────────────────────────────────────────────────
 function sptDecompress(rawBuf: Buffer): string {
   const buf = Buffer.from(rawBuf)
   try { return zlib.inflateSync(buf).toString('utf8').trim() } catch {}
   try { return zlib.inflateRawSync(buf).toString('utf8').trim() } catch {}
   try { return zlib.gunzipSync(buf).toString('utf8').trim() } catch {}
-  return buf.toString('utf8').replace(/^\uFEFF/, '').replace(/\0+$/, '').trim()
+  return buf.toString('utf8').replace(/^﻿/, '').replace(/\0+$/, '').trim()
 }
 
 async function sptGet(url: string, timeout = 10000): Promise<any> {
   const resp = await axiosInstance.get(url, { timeout, responseType: 'arraybuffer' })
-  return JSON.parse(sptDecompress(resp.data))
-}
-
-async function sptPost(url: string, body: object, timeout = 10000): Promise<any> {
-  const resp = await axiosInstance.post(url, body, {
-    timeout,
-    responseType: 'arraybuffer',
-    headers: { 'Content-Type': 'application/json' }
-  })
   return JSON.parse(sptDecompress(resp.data))
 }
 
@@ -71,58 +128,45 @@ function rawHttpPost(urlStr: string, body: Buffer, timeout = 10000): Promise<{ s
 async function launcherPost(url: string, body: object, timeout = 10000): Promise<any> {
   const jsonBuf = Buffer.from(JSON.stringify(body), 'utf8')
   const zlibBuf = zlib.deflateSync(jsonBuf)
-  console.log(`[launcherPost] sending ${zlibBuf.length} bytes, first bytes: ${zlibBuf.slice(0,4).toString('hex')}`)
   const { status, data } = await rawHttpPost(url, zlibBuf, timeout)
-  console.log(`[launcherPost] status=${status} response bytes=${data.length} hex=${data.slice(0,8).toString('hex')}`)
   if (data.length === 0) throw new Error(`Сервер вернул пустой ответ (status=${status})`)
   const text = sptDecompress(data)
-  console.log(`[launcherPost] text=${text.slice(0, 300)}`)
   const trimmed = text.trim()
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) return JSON.parse(trimmed)
   return trimmed
 }
 
 async function launcherGet(url: string, timeout = 10000): Promise<any> {
-  const resp = await axiosInstance.get(url, {
-    timeout,
-    validateStatus: () => true
-  })
+  const resp = await axiosInstance.get(url, { timeout, validateStatus: () => true })
   return resp.data
 }
 
 async function getServerBackendUrl(serverUrl: string): Promise<string> {
   try {
     const data = await launcherPost(`${serverUrl}/launcher/server/connect`, {})
-    console.log(`[getServerBackendUrl] raw:`, JSON.stringify(data))
     const payload = data?.data ?? data
     const backendUrl = payload?.backendUrl ?? payload?.BackendUrl ?? null
-    if (typeof backendUrl === 'string' && backendUrl) {
-      console.log(`[getServerBackendUrl] got: ${backendUrl}`)
-      return backendUrl
-    }
-  } catch (e) {
-    console.warn(`[getServerBackendUrl] /launcher/server/connect failed, fallback to serverUrl:`, e)
-  }
+    if (typeof backendUrl === 'string' && backendUrl) return backendUrl
+  } catch {}
   return serverUrl
 }
 
 async function loginToServer(serverUrl: string, username: string): Promise<string> {
   const data = await launcherPost(`${serverUrl}/launcher/profile/login`, { username, password: '' })
-  console.log(`[loginToServer] full data dump:`, JSON.stringify(data))
   const sessionId = data?.data ?? data
-  console.log(`[loginToServer] sessionId candidate: "${sessionId}" type=${typeof sessionId}`)
   if (typeof sessionId !== 'string' || !sessionId) {
     throw new Error(`Логин не удался. Ответ: ${JSON.stringify(data)}`)
   }
   return sessionId
 }
 
+// ── Window ─────────────────────────────────────────────────────────────────
 function createWindow(): void {
   const win = new BrowserWindow({
-    width: 1280, height: 720,
-    minWidth: 1100, minHeight: 660,
+    width: 1320, height: 780,
+    minWidth: 1180, minHeight: 700,
     frame: false,
-    backgroundColor: '#060810',
+    backgroundColor: '#06070b',
     resizable: true,
     icon: join(__dirname, '../../resources/icon.ico'),
     webPreferences: {
@@ -135,14 +179,13 @@ function createWindow(): void {
 
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL)
-    win.webContents.openDevTools()
+    win.webContents.openDevTools({ mode: 'detach' })
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
-    return { action: 'deny' }
+    shell.openExternal(url); return { action: 'deny' }
   })
 }
 
@@ -154,9 +197,13 @@ ipcMain.on('window:maximize', () => {
 })
 ipcMain.on('window:close', () => BrowserWindow.getFocusedWindow()?.close())
 
+// ── App meta ───────────────────────────────────────────────────────────────
+ipcMain.handle('app:getVersion', () => APP_VERSION)
+
 // ── Config ─────────────────────────────────────────────────────────────────
 ipcMain.handle('config:get', (_e, key: string) => store.get(key))
 ipcMain.handle('config:set', (_e, key: string, value: unknown) => store.set(key, value))
+ipcMain.handle('config:delete', (_e, key: string) => store.delete(key))
 
 // ── Dialog ─────────────────────────────────────────────────────────────────
 ipcMain.handle('dialog:pickFolder', async () => {
@@ -165,9 +212,19 @@ ipcMain.handle('dialog:pickFolder', async () => {
 })
 
 // ── Shell ──────────────────────────────────────────────────────────────────
-ipcMain.handle('shell:openPath', (_e, p: string) => shell.openPath(p))
+ipcMain.handle('shell:openPath',     (_e, p: string) => shell.openPath(p))
+ipcMain.handle('shell:openExternal', (_e, u: string) => shell.openExternal(u))
 
-// ── Проверка патча ─────────────────────────────────────────────────────────
+// ── Audio: load Convergence.mp3 as ArrayBuffer ─────────────────────────────
+ipcMain.handle('audio:loadTrack', async () => {
+  const p = getTrackPath()
+  if (!fs.existsSync(p)) throw new Error(`Track not found: ${p}`)
+  const buf = fs.readFileSync(p)
+  // ipc-friendly: return raw Uint8Array buffer (electron serialises efficiently)
+  return buf
+})
+
+// ── Game patch check ───────────────────────────────────────────────────────
 ipcMain.handle('game:isPatchApplied', (_e, gamePath: string) => {
   const bakPath = path.join(gamePath, 'EscapeFromTarkov_Data', 'Managed', 'Assembly-CSharp.dll.spt-bak')
   return fs.existsSync(bakPath)
@@ -176,24 +233,16 @@ ipcMain.handle('game:isPatchApplied', (_e, gamePath: string) => {
 // ── Game launch ────────────────────────────────────────────────────────────
 ipcMain.handle('game:launch', async (_e, gamePath: string, serverUrl: string, username: string) => {
   const gameExe = path.join(gamePath, 'EscapeFromTarkov.exe')
-  if (!fs.existsSync(gameExe)) {
-    throw new Error(`EscapeFromTarkov.exe не найден: ${gameExe}`)
-  }
+  if (!fs.existsSync(gameExe)) throw new Error(`EscapeFromTarkov.exe не найден: ${gameExe}`)
 
-  const sessionId = await loginToServer(serverUrl, username)
+  const sessionId  = await loginToServer(serverUrl, username)
   const backendUrl = await getServerBackendUrl(serverUrl)
 
   const configJson = `{'BackendUrl':'${backendUrl}','Version':'live'}`
   const launchArgs = `-force-gfx-jobs native -token=${sessionId} -config=${configJson}`
-  console.log(`[game:launch] gameExe=${gameExe}`)
-  console.log(`[game:launch] backendUrl=${backendUrl}`)
-  console.log(`[game:launch] args=${launchArgs}`)
 
   const child = spawn(gameExe, [launchArgs], {
-    detached: true,
-    stdio: 'ignore',
-    cwd: gamePath,
-    windowsVerbatimArguments: true
+    detached: true, stdio: 'ignore', cwd: gamePath, windowsVerbatimArguments: true
   })
 
   child.on('exit', () => {
@@ -208,22 +257,48 @@ ipcMain.handle('game:launch', async (_e, gamePath: string, serverUrl: string, us
 
 // ── Server ping ────────────────────────────────────────────────────────────
 ipcMain.handle('server:ping', async (_e, serverUrl: string) => {
+  const t0 = Date.now()
   try {
     await launcherGet(`${serverUrl}/launcher/ping`, 4000)
-    return true
-  } catch {
-    return false
+    return { ok: true, latencyMs: Date.now() - t0 }
+  } catch { return { ok: false, latencyMs: -1 } }
+})
+
+// ── Version info (real SPT version + update gate) ──────────────────────────
+ipcMain.handle('server:version', async (_e, serverUrl: string) => {
+  try {
+    const data    = await sptGet(`${serverUrl}/launcher/version`)
+    const payload = data?.data ?? data
+    return {
+      sptVersion:            payload?.SptVersion            ?? payload?.sptVersion            ?? 'unknown',
+      modVersion:            payload?.ModVersion            ?? payload?.modVersion            ?? 'unknown',
+      protocolVersion:       payload?.ProtocolVersion       ?? payload?.protocolVersion       ?? '1',
+      minLauncherVersion:    payload?.MinLauncherVersion    ?? payload?.minLauncherVersion    ?? '0.0.0',
+      latestLauncherVersion: payload?.LatestLauncherVersion ?? payload?.latestLauncherVersion ?? APP_VERSION,
+      launcherDownloadUrl:   payload?.LauncherDownloadUrl   ?? payload?.launcherDownloadUrl   ?? null,
+      releaseNotesUrl:       payload?.ReleaseNotesUrl       ?? payload?.releaseNotesUrl       ?? null
+    }
+  } catch (e: any) {
+    return null
   }
 })
 
-// ── Fetch manifest ─────────────────────────────────────────────────────────
+// ── Fetch server manifest ──────────────────────────────────────────────────
 ipcMain.handle('mods:fetchManifest', async (_e, serverUrl: string) => {
-  const data = await sptGet(`${serverUrl}/launcher/manifest`)
+  // Large modlists (thousands of files) take the server a while to assemble on
+  // a cold cache — give it generous headroom so we don't AxiosError-timeout.
+  const data    = await sptGet(`${serverUrl}/launcher/manifest`, 180_000)
   const payload = data?.data ?? data
+  // Guard: a server-side error must NOT look like an empty manifest, otherwise
+  // the client would treat every local file as "extra" and wipe them.
+  if (payload && typeof payload === 'object' && (payload.error || payload.Error)) {
+    throw new Error(String(payload.error ?? payload.Error))
+  }
   const rawMods = payload?.Mods ?? payload?.mods ?? []
   return {
     generatedAt: payload?.GeneratedAt ?? payload?.generatedAt ?? '',
-    version:     payload?.Version     ?? payload?.version     ?? '1.0.0',
+    modVersion:  payload?.ModVersion  ?? payload?.modVersion  ?? '1.0.0',
+    sptVersion:  payload?.SptVersion  ?? payload?.sptVersion  ?? 'unknown',
     mods: rawMods.map((m: any) => ({
       filename: m.Filename ?? m.filename ?? '',
       folder:   m.Folder   ?? m.folder   ?? '',
@@ -234,39 +309,36 @@ ipcMain.handle('mods:fetchManifest', async (_e, serverUrl: string) => {
 })
 
 // ── Scan local mods ────────────────────────────────────────────────────────
-ipcMain.handle('mods:scanLocal', async (_e, gamePath: string) => {
-  const results: Array<{ filename: string; folder: string; hash: string; size: number }> = []
-
-  const scanDir = (dir: string, baseDir: string, folder: string) => {
-    if (!fs.existsSync(dir)) return
-    for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
-      const fullPath = path.join(dir, item.name)
-      if (item.isDirectory()) {
-        scanDir(fullPath, baseDir, folder)
-      } else if (SYNC_EXTENSIONS.some(ext => item.name.endsWith(ext))) {
-        try {
-          const buf = fs.readFileSync(fullPath)
-          const relPath = path.relative(baseDir, fullPath).replace(/\\/g, '/')
-          results.push({
-            filename: relPath, folder,
-            hash: crypto.createHash('sha256').update(buf).digest('hex'),
-            size: buf.length
-          })
-        } catch { /* пропускаем заблокированные */ }
-      }
+function scanFolder(dir: string, baseDir: string, folder: string,
+                    out: Array<{filename:string;folder:string;hash:string;size:number}>) {
+  if (!fs.existsSync(dir)) return
+  for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, item.name)
+    if (item.isDirectory()) {
+      scanFolder(fullPath, baseDir, folder, out)
+    } else if (!isIgnored(item.name)) {
+      try {
+        const st = fs.statSync(fullPath)
+        const relPath = path.relative(baseDir, fullPath).split(path.sep).join('/')
+        out.push({ filename: relPath, folder, hash: hashFileCached(fullPath, st), size: st.size })
+      } catch { /* locked files */ }
     }
   }
+}
 
+ipcMain.handle('mods:scanLocal', async (_e, gamePath: string) => {
+  const results: Array<{filename:string;folder:string;hash:string;size:number}> = []
   for (const folder of ['plugins', 'patchers']) {
     const baseDir = path.join(gamePath, 'BepInEx', folder)
-    scanDir(baseDir, baseDir, folder)
+    scanFolder(baseDir, baseDir, folder, results)
   }
+  saveHashCache()
   return results
 })
 
-// ── Download mod ───────────────────────────────────────────────────────────
+// ── Download mod (server-side) ─────────────────────────────────────────────
 ipcMain.handle('mods:download', async (_e, serverUrl: string, gamePath: string, folder: string, filename: string) => {
-  if (isBlacklisted(filename)) return true
+  if (isSkipped(folder, filename) || isProtectedName(filename)) return true
   const url  = `${serverUrl}/launcher/mods/${folder}/${filename}`
   const dest = path.join(gamePath, 'BepInEx', folder, filename.replace(/\//g, path.sep))
 
@@ -279,20 +351,43 @@ ipcMain.handle('mods:download', async (_e, serverUrl: string, gamePath: string, 
   return true
 })
 
+// ── Remove a stale local file (present on client but no longer on server) ───
+// Hard-guarded: only inside BepInEx/{plugins,patchers}, never a skipped file,
+// and prunes the now-empty parent folders up to the managed root.
+ipcMain.handle('mods:removeExtra', async (_e, gamePath: string, folder: string, filename: string) => {
+  if (folder !== 'plugins' && folder !== 'patchers') return false
+  if (isSkipped(folder, filename) || isProtectedName(filename)) return false
+
+  const baseDir = path.resolve(path.join(gamePath, 'BepInEx', folder))
+  const target  = path.resolve(path.join(baseDir, filename.replace(/\//g, path.sep)))
+  // traversal guard — target must stay strictly inside baseDir
+  if (target === baseDir || !target.startsWith(baseDir + path.sep)) return false
+  if (!fs.existsSync(target)) return true
+
+  try { fs.rmSync(target, { force: true }) } catch { return false }
+
+  // prune empty parent directories, but never the managed root itself
+  let dir = path.dirname(target)
+  while (dir !== baseDir && dir.startsWith(baseDir + path.sep)) {
+    try {
+      if (fs.readdirSync(dir).length === 0) { fs.rmdirSync(dir); dir = path.dirname(dir) }
+      else break
+    } catch { break }
+  }
+  return true
+})
+
 // ── SPT Installer ──────────────────────────────────────────────────────────
 const SPT_INSTALLER_URL = 'https://ligma.waffle-lord.net/SPTInstaller.exe'
-
 function getInstallerPath(): string {
   return path.join(app.getPath('userData'), 'SPTInstaller.exe')
 }
 
-ipcMain.handle('spt:installerExists', () => {
-  return fs.existsSync(getInstallerPath())
-})
+ipcMain.handle('spt:installerExists', () => fs.existsSync(getInstallerPath()))
 
-ipcMain.handle('spt:downloadInstaller', async (_e) => {
+ipcMain.handle('spt:downloadInstaller', async () => {
   const dest = getInstallerPath()
-  const win = BrowserWindow.getAllWindows()[0]
+  const win  = BrowserWindow.getAllWindows()[0]
 
   const resp = await axiosInstance.get(SPT_INSTALLER_URL, {
     responseType: 'arraybuffer',
@@ -304,7 +399,6 @@ ipcMain.handle('spt:downloadInstaller', async (_e) => {
   })
 
   fs.writeFileSync(dest, Buffer.from(resp.data))
-
   spawn(dest, [], { detached: true, stdio: 'ignore' }).unref()
   return true
 })
@@ -322,8 +416,27 @@ ipcMain.handle('spt:cleanupInstaller', () => {
   return true
 })
 
+// ── Launcher self-update ───────────────────────────────────────────────────
+ipcMain.handle('update:downloadLauncher', async (_e, downloadUrl: string) => {
+  const dest = path.join(app.getPath('userData'), 'LauncherUpdate.exe')
+  const win  = BrowserWindow.getAllWindows()[0]
+
+  const resp = await axiosInstance.get(downloadUrl, {
+    responseType: 'arraybuffer', timeout: 300_000,
+    onDownloadProgress: (evt) => {
+      const pct = evt.total ? Math.round((evt.loaded / evt.total) * 100) : -1
+      if (win && !win.isDestroyed()) win.webContents.send('update:progress', pct)
+    }
+  })
+  fs.writeFileSync(dest, Buffer.from(resp.data))
+  spawn(dest, [], { detached: true, stdio: 'ignore' }).unref()
+  setTimeout(() => app.quit(), 800)
+  return true
+})
+
 // ── App lifecycle ──────────────────────────────────────────────────────────
 app.whenReady().then(() => {
+  loadHashCache()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

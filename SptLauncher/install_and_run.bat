@@ -1,5 +1,5 @@
 @echo off
-cd /d F:\test\ZALUPA\SPT\Develop\SptLauncher
+cd /d "%~dp0"
 echo Installing dependencies...
 "C:\Program Files\nodejs\npm.cmd" install
 echo.

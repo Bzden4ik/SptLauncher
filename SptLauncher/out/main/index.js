@@ -30,11 +30,84 @@ const crypto__namespace = /* @__PURE__ */ _interopNamespaceDefault(crypto);
 const https__namespace = /* @__PURE__ */ _interopNamespaceDefault(https);
 const zlib__namespace = /* @__PURE__ */ _interopNamespaceDefault(zlib);
 const store = new Store();
-const SYNC_EXTENSIONS = [".dll", ".cfg"];
-const SYNC_BLACKLIST = ["Fika.Headless.dll", "QuestMod.dll"];
-const isBlacklisted = (filename) => SYNC_BLACKLIST.some((b) => filename === b || filename.endsWith("/" + b));
+const IGNORE_FILES = /* @__PURE__ */ new Set(["desktop.ini", "thumbs.db", ".ds_store"]);
+const isIgnored = (name) => IGNORE_FILES.has(name.toLowerCase());
+const APP_VERSION = electron.app.getVersion();
 const httpsAgent = new https__namespace.Agent({ rejectUnauthorized: false });
 const axiosInstance = axios.create({ httpsAgent });
+let hashCache = {};
+let hashCacheDirty = false;
+function hashCachePath() {
+  return path__namespace.join(electron.app.getPath("userData"), "hashcache.json");
+}
+function loadHashCache() {
+  try {
+    hashCache = JSON.parse(fs__namespace.readFileSync(hashCachePath(), "utf8"));
+  } catch {
+    hashCache = {};
+  }
+}
+function saveHashCache() {
+  if (!hashCacheDirty) return;
+  try {
+    fs__namespace.writeFileSync(hashCachePath(), JSON.stringify(hashCache));
+    hashCacheDirty = false;
+  } catch {
+  }
+}
+function hashFileCached(full, st) {
+  const c = hashCache[full];
+  if (c && c.m === st.mtimeMs && c.s === st.size) return c.h;
+  const h = crypto__namespace.createHash("sha256").update(fs__namespace.readFileSync(full)).digest("hex");
+  hashCache[full] = { m: st.mtimeMs, s: st.size, h };
+  hashCacheDirty = true;
+  return h;
+}
+function getTrackPath() {
+  if (electron.app.isPackaged) {
+    return path.join(process.resourcesPath, "Convergence.mp3");
+  }
+  return path.join(__dirname, "..", "..", "resources", "Convergence.mp3");
+}
+function getUserBlacklist() {
+  const v = store.get("skippedMods");
+  return Array.isArray(v) ? v : [];
+}
+function isSkipped(folder, filename) {
+  const key = `${folder}/${filename}`;
+  return getUserBlacklist().includes(key);
+}
+const DEFAULT_PROTECTED_PATTERNS = [
+  "*savedata*",
+  "*save_data*",
+  "*_save.json",
+  "*.sav",
+  "*.save",
+  "*playerdata*",
+  "*player_data*",
+  "*userdata*",
+  "*user_data*"
+];
+function getProtectedPatterns() {
+  const v = store.get("protectedPatterns");
+  return Array.isArray(v) && v.length ? v : DEFAULT_PROTECTED_PATTERNS;
+}
+function globToRegex(glob) {
+  const esc = (s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp("^" + glob.split("*").map(esc).join(".*") + "$", "i");
+}
+function isProtectedName(filename) {
+  const i = filename.lastIndexOf("/");
+  const base = i >= 0 ? filename.slice(i + 1) : filename;
+  return getProtectedPatterns().some((p) => {
+    const target = p.includes("/") ? filename : base;
+    try {
+      return globToRegex(p).test(target);
+    } catch {
+      return false;
+    }
+  });
+}
 function sptDecompress(rawBuf) {
   const buf = Buffer.from(rawBuf);
   try {
@@ -49,7 +122,7 @@ function sptDecompress(rawBuf) {
     return zlib__namespace.gunzipSync(buf).toString("utf8").trim();
   } catch {
   }
-  return buf.toString("utf8").replace(/^\uFEFF/, "").replace(/\0+$/, "").trim();
+  return buf.toString("utf8").replace(/^﻿/, "").replace(/\0+$/, "").trim();
 }
 async function sptGet(url, timeout = 1e4) {
   const resp = await axiosInstance.get(url, { timeout, responseType: "arraybuffer" });
@@ -91,43 +164,30 @@ function rawHttpPost(urlStr, body, timeout = 1e4) {
 async function launcherPost(url, body, timeout = 1e4) {
   const jsonBuf = Buffer.from(JSON.stringify(body), "utf8");
   const zlibBuf = zlib__namespace.deflateSync(jsonBuf);
-  console.log(`[launcherPost] sending ${zlibBuf.length} bytes, first bytes: ${zlibBuf.slice(0, 4).toString("hex")}`);
   const { status, data } = await rawHttpPost(url, zlibBuf, timeout);
-  console.log(`[launcherPost] status=${status} response bytes=${data.length} hex=${data.slice(0, 8).toString("hex")}`);
   if (data.length === 0) throw new Error(`Сервер вернул пустой ответ (status=${status})`);
   const text = sptDecompress(data);
-  console.log(`[launcherPost] text=${text.slice(0, 300)}`);
   const trimmed = text.trim();
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) return JSON.parse(trimmed);
   return trimmed;
 }
 async function launcherGet(url, timeout = 1e4) {
-  const resp = await axiosInstance.get(url, {
-    timeout,
-    validateStatus: () => true
-  });
+  const resp = await axiosInstance.get(url, { timeout, validateStatus: () => true });
   return resp.data;
 }
 async function getServerBackendUrl(serverUrl) {
   try {
     const data = await launcherPost(`${serverUrl}/launcher/server/connect`, {});
-    console.log(`[getServerBackendUrl] raw:`, JSON.stringify(data));
     const payload = data?.data ?? data;
     const backendUrl = payload?.backendUrl ?? payload?.BackendUrl ?? null;
-    if (typeof backendUrl === "string" && backendUrl) {
-      console.log(`[getServerBackendUrl] got: ${backendUrl}`);
-      return backendUrl;
-    }
-  } catch (e) {
-    console.warn(`[getServerBackendUrl] /launcher/server/connect failed, fallback to serverUrl:`, e);
+    if (typeof backendUrl === "string" && backendUrl) return backendUrl;
+  } catch {
   }
   return serverUrl;
 }
 async function loginToServer(serverUrl, username) {
   const data = await launcherPost(`${serverUrl}/launcher/profile/login`, { username, password: "" });
-  console.log(`[loginToServer] full data dump:`, JSON.stringify(data));
   const sessionId = data?.data ?? data;
-  console.log(`[loginToServer] sessionId candidate: "${sessionId}" type=${typeof sessionId}`);
   if (typeof sessionId !== "string" || !sessionId) {
     throw new Error(`Логин не удался. Ответ: ${JSON.stringify(data)}`);
   }
@@ -135,12 +195,12 @@ async function loginToServer(serverUrl, username) {
 }
 function createWindow() {
   const win = new electron.BrowserWindow({
-    width: 1280,
-    height: 720,
-    minWidth: 1100,
-    minHeight: 660,
+    width: 1320,
+    height: 780,
+    minWidth: 1180,
+    minHeight: 700,
     frame: false,
-    backgroundColor: "#060810",
+    backgroundColor: "#06070b",
     resizable: true,
     icon: path.join(__dirname, "../../resources/icon.ico"),
     webPreferences: {
@@ -152,7 +212,7 @@ function createWindow() {
   });
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL);
-    win.webContents.openDevTools();
+    win.webContents.openDevTools({ mode: "detach" });
   } else {
     win.loadFile(path.join(__dirname, "../renderer/index.html"));
   }
@@ -167,29 +227,33 @@ electron.ipcMain.on("window:maximize", () => {
   w?.isMaximized() ? w.unmaximize() : w?.maximize();
 });
 electron.ipcMain.on("window:close", () => electron.BrowserWindow.getFocusedWindow()?.close());
+electron.ipcMain.handle("app:getVersion", () => APP_VERSION);
 electron.ipcMain.handle("config:get", (_e, key) => store.get(key));
 electron.ipcMain.handle("config:set", (_e, key, value) => store.set(key, value));
+electron.ipcMain.handle("config:delete", (_e, key) => store.delete(key));
 electron.ipcMain.handle("dialog:pickFolder", async () => {
   const result = await electron.dialog.showOpenDialog({ properties: ["openDirectory"] });
   return result.canceled ? null : result.filePaths[0];
 });
 electron.ipcMain.handle("shell:openPath", (_e, p) => electron.shell.openPath(p));
+electron.ipcMain.handle("shell:openExternal", (_e, u) => electron.shell.openExternal(u));
+electron.ipcMain.handle("audio:loadTrack", async () => {
+  const p = getTrackPath();
+  if (!fs__namespace.existsSync(p)) throw new Error(`Track not found: ${p}`);
+  const buf = fs__namespace.readFileSync(p);
+  return buf;
+});
 electron.ipcMain.handle("game:isPatchApplied", (_e, gamePath) => {
   const bakPath = path__namespace.join(gamePath, "EscapeFromTarkov_Data", "Managed", "Assembly-CSharp.dll.spt-bak");
   return fs__namespace.existsSync(bakPath);
 });
 electron.ipcMain.handle("game:launch", async (_e, gamePath, serverUrl, username) => {
   const gameExe = path__namespace.join(gamePath, "EscapeFromTarkov.exe");
-  if (!fs__namespace.existsSync(gameExe)) {
-    throw new Error(`EscapeFromTarkov.exe не найден: ${gameExe}`);
-  }
+  if (!fs__namespace.existsSync(gameExe)) throw new Error(`EscapeFromTarkov.exe не найден: ${gameExe}`);
   const sessionId = await loginToServer(serverUrl, username);
   const backendUrl = await getServerBackendUrl(serverUrl);
   const configJson = `{'BackendUrl':'${backendUrl}','Version':'live'}`;
   const launchArgs = `-force-gfx-jobs native -token=${sessionId} -config=${configJson}`;
-  console.log(`[game:launch] gameExe=${gameExe}`);
-  console.log(`[game:launch] backendUrl=${backendUrl}`);
-  console.log(`[game:launch] args=${launchArgs}`);
   const child = child_process.spawn(gameExe, [launchArgs], {
     detached: true,
     stdio: "ignore",
@@ -205,20 +269,42 @@ electron.ipcMain.handle("game:launch", async (_e, gamePath, serverUrl, username)
   return true;
 });
 electron.ipcMain.handle("server:ping", async (_e, serverUrl) => {
+  const t0 = Date.now();
   try {
     await launcherGet(`${serverUrl}/launcher/ping`, 4e3);
-    return true;
+    return { ok: true, latencyMs: Date.now() - t0 };
   } catch {
-    return false;
+    return { ok: false, latencyMs: -1 };
+  }
+});
+electron.ipcMain.handle("server:version", async (_e, serverUrl) => {
+  try {
+    const data = await sptGet(`${serverUrl}/launcher/version`);
+    const payload = data?.data ?? data;
+    return {
+      sptVersion: payload?.SptVersion ?? payload?.sptVersion ?? "unknown",
+      modVersion: payload?.ModVersion ?? payload?.modVersion ?? "unknown",
+      protocolVersion: payload?.ProtocolVersion ?? payload?.protocolVersion ?? "1",
+      minLauncherVersion: payload?.MinLauncherVersion ?? payload?.minLauncherVersion ?? "0.0.0",
+      latestLauncherVersion: payload?.LatestLauncherVersion ?? payload?.latestLauncherVersion ?? APP_VERSION,
+      launcherDownloadUrl: payload?.LauncherDownloadUrl ?? payload?.launcherDownloadUrl ?? null,
+      releaseNotesUrl: payload?.ReleaseNotesUrl ?? payload?.releaseNotesUrl ?? null
+    };
+  } catch (e) {
+    return null;
   }
 });
 electron.ipcMain.handle("mods:fetchManifest", async (_e, serverUrl) => {
-  const data = await sptGet(`${serverUrl}/launcher/manifest`);
+  const data = await sptGet(`${serverUrl}/launcher/manifest`, 18e4);
   const payload = data?.data ?? data;
+  if (payload && typeof payload === "object" && (payload.error || payload.Error)) {
+    throw new Error(String(payload.error ?? payload.Error));
+  }
   const rawMods = payload?.Mods ?? payload?.mods ?? [];
   return {
     generatedAt: payload?.GeneratedAt ?? payload?.generatedAt ?? "",
-    version: payload?.Version ?? payload?.version ?? "1.0.0",
+    modVersion: payload?.ModVersion ?? payload?.modVersion ?? "1.0.0",
+    sptVersion: payload?.SptVersion ?? payload?.sptVersion ?? "unknown",
     mods: rawMods.map((m) => ({
       filename: m.Filename ?? m.filename ?? "",
       folder: m.Folder ?? m.folder ?? "",
@@ -227,37 +313,33 @@ electron.ipcMain.handle("mods:fetchManifest", async (_e, serverUrl) => {
     }))
   };
 });
-electron.ipcMain.handle("mods:scanLocal", async (_e, gamePath) => {
-  const results = [];
-  const scanDir = (dir, baseDir, folder) => {
-    if (!fs__namespace.existsSync(dir)) return;
-    for (const item of fs__namespace.readdirSync(dir, { withFileTypes: true })) {
-      const fullPath = path__namespace.join(dir, item.name);
-      if (item.isDirectory()) {
-        scanDir(fullPath, baseDir, folder);
-      } else if (SYNC_EXTENSIONS.some((ext) => item.name.endsWith(ext))) {
-        try {
-          const buf = fs__namespace.readFileSync(fullPath);
-          const relPath = path__namespace.relative(baseDir, fullPath).replace(/\\/g, "/");
-          results.push({
-            filename: relPath,
-            folder,
-            hash: crypto__namespace.createHash("sha256").update(buf).digest("hex"),
-            size: buf.length
-          });
-        } catch {
-        }
+function scanFolder(dir, baseDir, folder, out) {
+  if (!fs__namespace.existsSync(dir)) return;
+  for (const item of fs__namespace.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path__namespace.join(dir, item.name);
+    if (item.isDirectory()) {
+      scanFolder(fullPath, baseDir, folder, out);
+    } else if (!isIgnored(item.name)) {
+      try {
+        const st = fs__namespace.statSync(fullPath);
+        const relPath = path__namespace.relative(baseDir, fullPath).split(path__namespace.sep).join("/");
+        out.push({ filename: relPath, folder, hash: hashFileCached(fullPath, st), size: st.size });
+      } catch {
       }
     }
-  };
+  }
+}
+electron.ipcMain.handle("mods:scanLocal", async (_e, gamePath) => {
+  const results = [];
   for (const folder of ["plugins", "patchers"]) {
     const baseDir = path__namespace.join(gamePath, "BepInEx", folder);
-    scanDir(baseDir, baseDir, folder);
+    scanFolder(baseDir, baseDir, folder, results);
   }
+  saveHashCache();
   return results;
 });
 electron.ipcMain.handle("mods:download", async (_e, serverUrl, gamePath, folder, filename) => {
-  if (isBlacklisted(filename)) return true;
+  if (isSkipped(folder, filename) || isProtectedName(filename)) return true;
   const url = `${serverUrl}/launcher/mods/${folder}/${filename}`;
   const dest = path__namespace.join(gamePath, "BepInEx", folder, filename.replace(/\//g, path__namespace.sep));
   fs__namespace.mkdirSync(path__namespace.dirname(dest), { recursive: true });
@@ -267,14 +349,37 @@ electron.ipcMain.handle("mods:download", async (_e, serverUrl, gamePath, folder,
   fs__namespace.writeFileSync(dest, Buffer.from(b64, "base64"));
   return true;
 });
+electron.ipcMain.handle("mods:removeExtra", async (_e, gamePath, folder, filename) => {
+  if (folder !== "plugins" && folder !== "patchers") return false;
+  if (isSkipped(folder, filename) || isProtectedName(filename)) return false;
+  const baseDir = path__namespace.resolve(path__namespace.join(gamePath, "BepInEx", folder));
+  const target = path__namespace.resolve(path__namespace.join(baseDir, filename.replace(/\//g, path__namespace.sep)));
+  if (target === baseDir || !target.startsWith(baseDir + path__namespace.sep)) return false;
+  if (!fs__namespace.existsSync(target)) return true;
+  try {
+    fs__namespace.rmSync(target, { force: true });
+  } catch {
+    return false;
+  }
+  let dir = path__namespace.dirname(target);
+  while (dir !== baseDir && dir.startsWith(baseDir + path__namespace.sep)) {
+    try {
+      if (fs__namespace.readdirSync(dir).length === 0) {
+        fs__namespace.rmdirSync(dir);
+        dir = path__namespace.dirname(dir);
+      } else break;
+    } catch {
+      break;
+    }
+  }
+  return true;
+});
 const SPT_INSTALLER_URL = "https://ligma.waffle-lord.net/SPTInstaller.exe";
 function getInstallerPath() {
   return path__namespace.join(electron.app.getPath("userData"), "SPTInstaller.exe");
 }
-electron.ipcMain.handle("spt:installerExists", () => {
-  return fs__namespace.existsSync(getInstallerPath());
-});
-electron.ipcMain.handle("spt:downloadInstaller", async (_e) => {
+electron.ipcMain.handle("spt:installerExists", () => fs__namespace.existsSync(getInstallerPath()));
+electron.ipcMain.handle("spt:downloadInstaller", async () => {
   const dest = getInstallerPath();
   const win = electron.BrowserWindow.getAllWindows()[0];
   const resp = await axiosInstance.get(SPT_INSTALLER_URL, {
@@ -300,7 +405,24 @@ electron.ipcMain.handle("spt:cleanupInstaller", () => {
   if (fs__namespace.existsSync(dest)) fs__namespace.unlinkSync(dest);
   return true;
 });
+electron.ipcMain.handle("update:downloadLauncher", async (_e, downloadUrl) => {
+  const dest = path__namespace.join(electron.app.getPath("userData"), "LauncherUpdate.exe");
+  const win = electron.BrowserWindow.getAllWindows()[0];
+  const resp = await axiosInstance.get(downloadUrl, {
+    responseType: "arraybuffer",
+    timeout: 3e5,
+    onDownloadProgress: (evt) => {
+      const pct = evt.total ? Math.round(evt.loaded / evt.total * 100) : -1;
+      if (win && !win.isDestroyed()) win.webContents.send("update:progress", pct);
+    }
+  });
+  fs__namespace.writeFileSync(dest, Buffer.from(resp.data));
+  child_process.spawn(dest, [], { detached: true, stdio: "ignore" }).unref();
+  setTimeout(() => electron.app.quit(), 800);
+  return true;
+});
 electron.app.whenReady().then(() => {
+  loadHashCache();
   createWindow();
   electron.app.on("activate", () => {
     if (electron.BrowserWindow.getAllWindows().length === 0) createWindow();

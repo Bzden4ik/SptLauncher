@@ -1,124 +1,199 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import TitleBar from './components/TitleBar'
+import ReconMap from './components/ReconMap'
+import SignalScope from './components/SignalScope'
+import BootSequence from './components/BootSequence'
+import SettingsOverlay from './components/SettingsOverlay'
 import SetupScreen from './screens/SetupScreen'
-import SyncScreen from './screens/SyncScreen'
-import MainScreen from './screens/MainScreen'
+import LoadoutScreen from './screens/SyncScreen'
+import DeployScreen from './screens/MainScreen'
+import { useAmbientAudio } from './audio/useAmbientAudio'
+import { useI18n } from './i18n'
 
-type Screen = 'setup' | 'sync' | 'main'
-type ServerStatus = 'unknown' | 'online' | 'offline'
+type Screen = 'setup' | 'loadout' | 'deploy'
+type Ping = { ok: boolean | null; latencyMs: number }
+interface ServerVersion {
+  sptVersion: string; modVersion: string
+  latestLauncherVersion: string; launcherDownloadUrl: string | null; releaseNotesUrl: string | null
+}
+
+function isNewer(a: string, b: string): boolean {
+  const pa = a.split('.').map(n => parseInt(n, 10) || 0)
+  const pb = b.split('.').map(n => parseInt(n, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0
+    if (x > y) return true; if (x < y) return false
+  }
+  return false
+}
+function gridRef(seed: number): string {
+  const n = (s: number, m: number) => String(Math.floor((Math.sin(seed * s) * 0.5 + 0.5) * m)).padStart(3, '0')
+  return `37T ${n(1.7, 900)} ${n(3.1, 900)}`
+}
 
 export default function App() {
+  const { t } = useI18n()
+  const [booting,      setBooting]      = useState(true)
   const [screen,       setScreen]       = useState<Screen>('setup')
   const [gamePath,     setGamePath]     = useState('')
   const [serverUrl,    setServerUrl]    = useState('https://127.0.0.1:6969')
   const [username,     setUsername]     = useState('')
-  const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown')
+  const [ping,         setPing]         = useState<Ping>({ ok: null, latencyMs: -1 })
+  const [serverVer,    setServerVer]    = useState<ServerVersion | null>(null)
+  const [appVer,       setAppVer]       = useState('1.1.0')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+
+  const audio = useAmbientAudio()
 
   useEffect(() => {
     Promise.all([
       window.api.config.get('gamePath'),
       window.api.config.get('serverUrl'),
       window.api.config.get('username'),
-    ]).then(([gp, su, un]) => {
+      window.api.app.getVersion()
+    ]).then(([gp, su, un, ver]) => {
+      setAppVer(ver as string)
       if (gp && su && un) {
-        setGamePath(gp as string)
-        setServerUrl(su as string)
-        setUsername(un as string)
-        setScreen('sync')
+        setGamePath(gp as string); setServerUrl(su as string); setUsername(un as string)
+        setScreen('loadout')
       }
     })
   }, [])
 
-  const pingServer = useCallback(async (url: string) => {
-    const ok = await window.api.server.ping(url)
-    setServerStatus(ok ? 'online' : 'offline')
+  const refresh = useCallback(async (url: string) => {
+    const p = await window.api.server.ping(url)
+    setPing(p as Ping)
+    if (p.ok) { const v = await window.api.server.version(url); if (v) setServerVer(v as ServerVersion) }
   }, [])
 
   useEffect(() => {
     if (screen === 'setup' || !serverUrl) return
-    pingServer(serverUrl)
-    const id = setInterval(() => pingServer(serverUrl), 15_000)
+    refresh(serverUrl)
+    const id = setInterval(() => refresh(serverUrl), 15_000)
     return () => clearInterval(id)
-  }, [screen, serverUrl, pingServer])
+  }, [screen, serverUrl, refresh])
 
-  const handleSetupDone = (gp: string, su: string, un: string) => {
-    setGamePath(gp)
-    setServerUrl(su)
-    setUsername(un)
-    setServerStatus('unknown')
-    setScreen('sync')
+  const onSetupDone = (gp: string, su: string, un: string) => {
+    setGamePath(gp); setServerUrl(su); setUsername(un)
+    setPing({ ok: null, latencyMs: -1 }); setScreen('loadout')
   }
 
-  const isInApp = screen !== 'setup'
-  const statusLabel = serverStatus === 'online' ? 'Сервер онлайн'
-    : serverStatus === 'offline' ? 'Сервер недоступен' : 'Проверка...'
+  const updateAvailable = serverVer && serverVer.launcherDownloadUrl && isNewer(serverVer.latestLauncherVersion, appVer)
+  const onUpdate = async () => {
+    if (!serverVer?.launcherDownloadUrl) return
+    try { await window.api.update.downloadLauncher(serverVer.launcherDownloadUrl) } catch (e) { console.error(e) }
+  }
+
+  const pingTxt = ping.ok === null ? t('link.scan') : ping.ok ? `${ping.latencyMs}ms` : t('link.nolink')
+  const linkCls = ping.ok ? 'live' : ping.ok === false ? 'dead' : ''
+  const sector = screen === 'deploy' ? t('sector.deploy') : screen === 'loadout' ? t('sector.loadout') : t('sector.intake')
 
   return (
-    <div className="app-root">
-      <TitleBar />
+    <div className="console">
+      <ReconMap />
+      <div className="recon-grid" />
+      <div className="recon-vignette" />
 
-      {!isInApp ? (
-        <SetupScreen onNext={handleSetupDone} />
+      <TitleBar sector={sector} />
+
+      <span className="frame-mark tl" /><span className="frame-mark tr" />
+      <span className="frame-mark bl" /><span className="frame-mark br" />
+      <span className="frame-coord tl">{gridRef(11)}</span>
+      <span className="frame-coord br">ALT 000 · BRG {Math.floor((Date.now() / 600) % 360)}</span>
+
+      {screen === 'setup' ? (
+        <SetupScreen onNext={onSetupDone} />
       ) : (
         <>
-          <div className="app-layout">
-            <nav className="nav-sidebar">
-              <div className="nav-items">
-                <button
-                  className={`nav-item ${screen === 'main' ? 'active' : ''}`}
-                  onClick={() => setScreen('main')}
-                >
-                  <span className="nav-icon">&#9750;</span>
-                  <span>ГЛАВНАЯ</span>
-                </button>
-                <button
-                  className={`nav-item ${screen === 'sync' ? 'active' : ''}`}
-                  onClick={() => setScreen('sync')}
-                >
-                  <span className="nav-icon">&#10227;</span>
-                  <span>МОДЫ</span>
-                </button>
+          <div className="console-body">
+            <aside className="rail">
+              <div className="dossier">
+                <div className="dossier-tab">{t('dossier.operator')}</div>
+                <div className="dossier-top">
+                  <div className="dossier-sigil">{(username || '?').slice(0, 1).toUpperCase()}</div>
+                  <div>
+                    <div className="dossier-name">{username || t('common.unknown')}</div>
+                    <div className="dossier-role">{t('dossier.role')}</div>
+                  </div>
+                </div>
+                <div className="dossier-rows">
+                  <div className="dossier-row"><span className="k">{t('dossier.uplink')}</span><span className={`v ${linkCls}`}>{pingTxt}</span></div>
+                  <div className="dossier-row"><span className="k">{t('dossier.spt')}</span><span className="v">{serverVer?.sptVersion ?? '—'}</span></div>
+                  <div className="dossier-row"><span className="k">{t('dossier.server')}</span><span className="v">{serverUrl.replace(/^https?:\/\//, '')}</span></div>
+                </div>
               </div>
-              <div className="nav-bottom">
-                <button className="nav-item" onClick={() => setScreen('setup')}>
-                  <span className="nav-icon">&#9881;</span>
-                  <span>НАСТРОЙКИ</span>
-                </button>
-              </div>
-            </nav>
 
-            <div className="app-content">
-              {screen === 'sync' && (
-                <SyncScreen
-                  gamePath={gamePath}
-                  serverUrl={serverUrl}
-                  onDone={() => setScreen('main')}
-                />
+              <nav className="channels">
+                <div className="chan-label">{t('chan.label')}</div>
+                <button className={`chan ${screen === 'deploy' ? 'on' : ''}`} onClick={() => setScreen('deploy')}>
+                  <span className="num">CH.01</span><span className="nm">{t('chan.deploy')}</span>
+                </button>
+                <button className={`chan ${screen === 'loadout' ? 'on' : ''}`} onClick={() => setScreen('loadout')}>
+                  <span className="num">CH.02</span><span className="nm">{t('chan.loadout')}</span>
+                </button>
+                <div className="spacer" />
+                <button className="chan" onClick={() => setSettingsOpen(true)}>
+                  <span className="num">CFG</span><span className="nm">{t('chan.system')}</span>
+                </button>
+                <div className="chan-foot">
+                  <span className="ver">{t('chan.console', { v: appVer })}</span>
+                  <span className="ver">{t('chan.mod', { v: serverVer?.modVersion ?? '—' })}</span>
+                </div>
+              </nav>
+            </aside>
+
+            <main className="stage">
+              {updateAvailable && (
+                <div className="banner">
+                  <span className="dot ok" />
+                  <div className="banner-t">
+                    <div className="h">{t('banner.title')}</div>
+                    <div className="s">{t('banner.sub', { a: serverVer!.latestLauncherVersion, b: appVer })}</div>
+                  </div>
+                  {serverVer!.releaseNotesUrl &&
+                    <button className="btn btn-sm btn-ghost" onClick={() => window.api.shell.openExternal(serverVer!.releaseNotesUrl!)}>{t('banner.notes')}</button>}
+                  <button className="btn btn-sm btn-primary" onClick={onUpdate}>{t('banner.update')}</button>
+                </div>
               )}
-              {screen === 'main' && (
-                <MainScreen
-                  gamePath={gamePath}
-                  serverUrl={serverUrl}
-                  username={username}
-                  serverOnline={serverStatus === 'online'}
-                />
-              )}
+              <div className="stage-inner" key={screen}>
+                {screen === 'loadout' && <LoadoutScreen gamePath={gamePath} serverUrl={serverUrl} onDone={() => setScreen('deploy')} />}
+                {screen === 'deploy'  && <DeployScreen gamePath={gamePath} serverUrl={serverUrl} username={username} serverOnline={ping.ok === true} sptVersion={serverVer?.sptVersion ?? null} />}
+              </div>
+            </main>
+          </div>
+
+          <div className="comms">
+            <div className="comms-datums">
+              <div className="datum"><span className="k">{t('comms.uplink')}</span><span className="v"><span className={`datum-dot ${linkCls}`} />{pingTxt}</span></div>
+              <span className="comms-sep" />
+              <div className="datum"><span className="k">{t('comms.sptcore')}</span><span className="v">{serverVer?.sptVersion ?? '—'}</span></div>
+              <span className="comms-sep" />
+              <div className="datum"><span className="k">{t('comms.mod')}</span><span className="v">{serverVer?.modVersion ?? '—'}</span></div>
+            </div>
+
+            <div />
+
+            <div className="scope">
+              <div className="scope-frame"><SignalScope muted={audio.muted || audio.volume === 0} /></div>
+              <div className="scope-ctrls">
+                <span className="scope-gain">{audio.muted ? 'MUTE' : `${Math.round(audio.volume * 100)}%`}</span>
+                <button className={`scope-mute ${audio.muted ? 'muted' : ''}`} onClick={audio.toggleMute} title={audio.muted ? t('audio.unmute') : t('audio.mute')}>
+                  {audio.muted ? '✕' : '♪'}
+                </button>
+              </div>
             </div>
           </div>
 
-          <div className="status-bar">
-            <div className="status-left">
-              <span className={`status-indicator ${serverStatus === 'online' ? 'online' : serverStatus === 'offline' ? 'offline' : ''}`} />
-              <span className="status-text">{statusLabel}</span>
-            </div>
-            <div className="status-right">
-              <span className="status-info">{username}</span>
-              <span className="status-sep">|</span>
-              <span className="status-info">{serverUrl}</span>
-            </div>
-          </div>
+          <SettingsOverlay
+            open={settingsOpen}
+            onClose={() => setSettingsOpen(false)}
+            serverUrl={serverUrl} gamePath={gamePath} username={username}
+            onEditConnection={() => { setSettingsOpen(false); setScreen('setup') }}
+          />
         </>
       )}
+
+      {booting && <BootSequence onDone={() => setBooting(false)} />}
     </div>
   )
 }
