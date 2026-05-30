@@ -86,6 +86,10 @@ namespace SptLauncherServer.Routes
 
             var native = filePath.Replace('/', Path.DirectorySeparatorChar);
 
+            // Never serve headless-only / blocked files even if requested directly.
+            if (string.Equals(Path.GetFileName(native), "Fika.Headless.dll", StringComparison.OrdinalIgnoreCase))
+                return _httpUtil.GetBody(new { error = "Not found" });
+
             foreach (var root in RootsFor(folder))
             {
                 var allowed  = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);

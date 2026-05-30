@@ -27,6 +27,11 @@ namespace SptLauncherServer.Routes
         private static readonly HashSet<string> IgnoreFiles =
             new(StringComparer.OrdinalIgnoreCase) { "desktop.ini", "thumbs.db", ".ds_store" };
 
+        // Server-only / headless files that must NEVER be served to clients.
+        // Fika.Headless.dll is the dedicated-server plugin and breaks a normal client.
+        private static readonly HashSet<string> BlockedFiles =
+            new(StringComparer.OrdinalIgnoreCase) { "Fika.Headless.dll" };
+
         private static ISptLogger<LauncherManifestRouter> _logger = null!;
         private static HttpResponseUtil _httpUtil = null!;
         private static JsonUtil         _jsonUtil = null!;
@@ -134,7 +139,8 @@ namespace SptLauncherServer.Routes
 
                 foreach (var file in Directory.EnumerateFiles(absPath, "*", SearchOption.AllDirectories))
                 {
-                    if (IgnoreFiles.Contains(Path.GetFileName(file))) continue;
+                    var fileName = Path.GetFileName(file);
+                    if (IgnoreFiles.Contains(fileName) || BlockedFiles.Contains(fileName)) continue;
 
                     var relPath = Path.GetRelativePath(absPath, file).Replace('\\', '/');
                     var key     = folder + "/" + relPath;

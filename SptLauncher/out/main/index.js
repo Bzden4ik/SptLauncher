@@ -32,6 +32,12 @@ const zlib__namespace = /* @__PURE__ */ _interopNamespaceDefault(zlib);
 const store = new Store();
 const IGNORE_FILES = /* @__PURE__ */ new Set(["desktop.ini", "thumbs.db", ".ds_store"]);
 const isIgnored = (name) => IGNORE_FILES.has(name.toLowerCase());
+const BLOCKED_FILES = /* @__PURE__ */ new Set(["fika.headless.dll"]);
+const baseNameOf = (p) => {
+  const i = p.lastIndexOf("/");
+  return i >= 0 ? p.slice(i + 1) : p;
+};
+const isBlocked = (filename) => BLOCKED_FILES.has(baseNameOf(filename).toLowerCase());
 const APP_VERSION = electron.app.getVersion();
 const httpsAgent = new https__namespace.Agent({ rejectUnauthorized: false });
 const axiosInstance = axios.create({ httpsAgent });
@@ -310,7 +316,7 @@ electron.ipcMain.handle("mods:fetchManifest", async (_e, serverUrl) => {
       folder: m.Folder ?? m.folder ?? "",
       hash: m.Hash ?? m.hash ?? "",
       size: m.Size ?? m.size ?? 0
-    }))
+    })).filter((m) => !isBlocked(m.filename))
   };
 });
 function scanFolder(dir, baseDir, folder, out) {
@@ -319,7 +325,7 @@ function scanFolder(dir, baseDir, folder, out) {
     const fullPath = path__namespace.join(dir, item.name);
     if (item.isDirectory()) {
       scanFolder(fullPath, baseDir, folder, out);
-    } else if (!isIgnored(item.name)) {
+    } else if (!isIgnored(item.name) && !isBlocked(item.name)) {
       try {
         const st = fs__namespace.statSync(fullPath);
         const relPath = path__namespace.relative(baseDir, fullPath).split(path__namespace.sep).join("/");
@@ -339,7 +345,7 @@ electron.ipcMain.handle("mods:scanLocal", async (_e, gamePath) => {
   return results;
 });
 electron.ipcMain.handle("mods:download", async (_e, serverUrl, gamePath, folder, filename) => {
-  if (isSkipped(folder, filename) || isProtectedName(filename)) return true;
+  if (isSkipped(folder, filename) || isProtectedName(filename) || isBlocked(filename)) return true;
   const url = `${serverUrl}/launcher/mods/${folder}/${filename}`;
   const dest = path__namespace.join(gamePath, "BepInEx", folder, filename.replace(/\//g, path__namespace.sep));
   fs__namespace.mkdirSync(path__namespace.dirname(dest), { recursive: true });

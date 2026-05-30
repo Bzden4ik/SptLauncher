@@ -15,6 +15,13 @@ const store = new Store<any>()
 // asset bundles, nested folders, the lot. Only obvious OS/runtime junk is skipped.
 const IGNORE_FILES    = new Set(['desktop.ini', 'thumbs.db', '.ds_store'])
 const isIgnored       = (name: string) => IGNORE_FILES.has(name.toLowerCase())
+
+// Headless-only files that must NEVER be installed onto a client, nor deleted
+// from it — the Fika headless plugin is server-side only and breaks a normal
+// client. Matched by basename, case-insensitively.
+const BLOCKED_FILES   = new Set(['fika.headless.dll'])
+const baseNameOf      = (p: string) => { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p }
+const isBlocked       = (filename: string) => BLOCKED_FILES.has(baseNameOf(filename).toLowerCase())
 const APP_VERSION     = app.getVersion()
 
 // SPT использует самоподписанный сертификат
@@ -299,12 +306,15 @@ ipcMain.handle('mods:fetchManifest', async (_e, serverUrl: string) => {
     generatedAt: payload?.GeneratedAt ?? payload?.generatedAt ?? '',
     modVersion:  payload?.ModVersion  ?? payload?.modVersion  ?? '1.0.0',
     sptVersion:  payload?.SptVersion  ?? payload?.sptVersion  ?? 'unknown',
-    mods: rawMods.map((m: any) => ({
-      filename: m.Filename ?? m.filename ?? '',
-      folder:   m.Folder   ?? m.folder   ?? '',
-      hash:     m.Hash     ?? m.hash     ?? '',
-      size:     m.Size     ?? m.size     ?? 0
-    }))
+    mods: rawMods
+      .map((m: any) => ({
+        filename: m.Filename ?? m.filename ?? '',
+        folder:   m.Folder   ?? m.folder   ?? '',
+        hash:     m.Hash     ?? m.hash     ?? '',
+        size:     m.Size     ?? m.size     ?? 0
+      }))
+      // Drop blocked files even if an older server still advertises them.
+      .filter((m: any) => !isBlocked(m.filename))
   }
 })
 
@@ -316,7 +326,9 @@ function scanFolder(dir: string, baseDir: string, folder: string,
     const fullPath = path.join(dir, item.name)
     if (item.isDirectory()) {
       scanFolder(fullPath, baseDir, folder, out)
-    } else if (!isIgnored(item.name)) {
+    } else if (!isIgnored(item.name) && !isBlocked(item.name)) {
+      // isBlocked → leave the file completely untouched (not synced, not flagged
+      // extra, never deleted). Fika.Headless.dll on a client is left as-is.
       try {
         const st = fs.statSync(fullPath)
         const relPath = path.relative(baseDir, fullPath).split(path.sep).join('/')
@@ -338,7 +350,7 @@ ipcMain.handle('mods:scanLocal', async (_e, gamePath: string) => {
 
 // ── Download mod (server-side) ─────────────────────────────────────────────
 ipcMain.handle('mods:download', async (_e, serverUrl: string, gamePath: string, folder: string, filename: string) => {
-  if (isSkipped(folder, filename) || isProtectedName(filename)) return true
+  if (isSkipped(folder, filename) || isProtectedName(filename) || isBlocked(filename)) return true
   const url  = `${serverUrl}/launcher/mods/${folder}/${filename}`
   const dest = path.join(gamePath, 'BepInEx', folder, filename.replace(/\//g, path.sep))
 
