@@ -32,12 +32,15 @@ export default function SetupScreen({ onNext }: Props) {
     if (!gamePath) { setError(t('err.pickgame')); return }
     if (!username) { setError(t('err.pickname')); return }
     setChecking(true); setError('')
+    // strip trailing slashes / whitespace so we never build "host//launcher/..."
+    const su = serverUrl.trim().replace(/\/+$/, '')
+    setServerUrl(su)
     try {
       await window.api.config.set('gamePath', gamePath)
-      await window.api.config.set('serverUrl', serverUrl)
+      await window.api.config.set('serverUrl', su)
       await window.api.config.set('username', username)
       await window.api.spt.cleanupInstaller()
-      onNext(gamePath, serverUrl, username)
+      onNext(gamePath, su, username)
     } catch (e: any) { setError(t('err.generic', { e: e?.message ?? e })) } finally { setChecking(false) }
   }
 

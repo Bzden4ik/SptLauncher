@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld('api', {
     }
   },
   update: {
+    checkGithub:      ()                           => ipcRenderer.invoke('update:checkGithub'),
     downloadLauncher: (url: string)               => ipcRenderer.invoke('update:downloadLauncher', url),
     onProgress:       (cb: (pct: number) => void) => {
       const handler = (_: any, pct: number) => cb(pct)

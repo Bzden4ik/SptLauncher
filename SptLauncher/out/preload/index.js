@@ -54,6 +54,7 @@ electron.contextBridge.exposeInMainWorld("api", {
     }
   },
   update: {
+    checkGithub: () => electron.ipcRenderer.invoke("update:checkGithub"),
     downloadLauncher: (url) => electron.ipcRenderer.invoke("update:downloadLauncher", url),
     onProgress: (cb) => {
       const handler = (_, pct) => cb(pct);

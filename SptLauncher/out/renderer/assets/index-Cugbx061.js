@@ -7483,7 +7483,8 @@ function ReconMap() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     let raf = 0;
-    let w2 = 0, h = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
+    let w2 = 0, h = 0;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const resize = () => {
       const r2 = canvas.getBoundingClientRect();
       w2 = Math.max(1, r2.width);
@@ -7502,56 +7503,46 @@ function ReconMap() {
     window.addEventListener("mousemove", onMove);
     const start = performance.now();
     let energy = 0;
+    let last = 0;
+    const FRAME = 1e3 / 30;
     const draw = (now) => {
+      raf = requestAnimationFrame(draw);
+      if (now - last < FRAME) return;
+      last = now;
       const t2 = (now - start) / 1e3;
-      mouse.current.x += (mouse.current.tx - mouse.current.x) * 0.05;
-      mouse.current.y += (mouse.current.ty - mouse.current.y) * 0.05;
+      mouse.current.x += (mouse.current.tx - mouse.current.x) * 0.06;
+      mouse.current.y += (mouse.current.ty - mouse.current.y) * 0.06;
       const px = mouse.current.x - 0.5;
       const py = mouse.current.y - 0.5;
       const e = ambientAudio.energy();
       energy += (e - energy) * 0.08;
-      ctx.clearRect(0, 0, w2, h);
-      const g = ctx.createLinearGradient(0, 0, 0, h);
-      g.addColorStop(0, "rgba(18,26,38,0.0)");
-      g.addColorStop(1, "rgba(8,12,20,0.0)");
-      ctx.fillStyle = g;
+      ctx.fillStyle = "#0b1019";
       ctx.fillRect(0, 0, w2, h);
-      const spacing = 26;
+      const base = ctx.createLinearGradient(0, 0, 0, h);
+      base.addColorStop(0, "#0f1722");
+      base.addColorStop(0.55, "#0b1019");
+      base.addColorStop(1, "#080b11");
+      ctx.fillStyle = base;
+      ctx.fillRect(0, 0, w2, h);
+      const spacing = 28;
       const count = Math.ceil(h / spacing) + 4;
-      const baseAmp = 16 + energy * 26;
-      const offX = px * 26;
-      const offY = py * 18;
+      const baseAmp = 15 + energy * 18;
+      const offX = px * 24;
+      const offY = py * 16;
       for (let i = 0; i < count; i++) {
         const yBase = i * spacing - 40 + offY;
         const phase = i * 0.55;
         const isIndex = i % 5 === 0;
         ctx.beginPath();
-        const stepX = 12;
-        for (let x2 = -20; x2 <= w2 + 20; x2 += stepX) {
+        for (let x2 = -20; x2 <= w2 + 20; x2 += 14) {
           const nx = x2 + offX;
-          const y2 = yBase + Math.sin(nx * 6e-3 + t2 * 0.25 + phase) * baseAmp + Math.sin(nx * 0.013 - t2 * 0.18 + phase * 1.7) * (baseAmp * 0.5) + Math.sin(nx * 27e-4 + t2 * 0.12) * (baseAmp * 0.7);
-          if (x2 === -20) ctx.moveTo(x2, y2);
-          else ctx.lineTo(x2, y2);
+          const y2 = yBase + Math.sin(nx * 6e-3 + t2 * 0.22 + phase) * baseAmp + Math.sin(nx * 0.013 - t2 * 0.16 + phase * 1.7) * (baseAmp * 0.5) + Math.sin(nx * 27e-4 + t2 * 0.1) * (baseAmp * 0.7);
+          x2 === -20 ? ctx.moveTo(x2, y2) : ctx.lineTo(x2, y2);
         }
-        if (isIndex) {
-          ctx.strokeStyle = `rgba(242,167,59,${0.05 + energy * 0.1})`;
-          ctx.lineWidth = 1.1;
-        } else {
-          ctx.strokeStyle = `rgba(150,178,205,${0.045 + energy * 0.03})`;
-          ctx.lineWidth = 0.8;
-        }
+        ctx.strokeStyle = isIndex ? `rgba(242,167,59,${0.05 + energy * 0.05})` : `rgba(150,178,205,${0.05})`;
+        ctx.lineWidth = isIndex ? 1.1 : 0.8;
         ctx.stroke();
       }
-      const cx = w2 * (0.5 + px * 0.04);
-      const cy = h * (0.46 + py * 0.04);
-      const rad = Math.min(w2, h) * (0.42 + energy * 0.12);
-      const rg2 = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
-      rg2.addColorStop(0, `rgba(242,167,59,${0.05 + energy * 0.06})`);
-      rg2.addColorStop(0.5, "rgba(242,167,59,0.015)");
-      rg2.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = rg2;
-      ctx.fillRect(0, 0, w2, h);
-      raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
     return () => {
@@ -7820,12 +7811,14 @@ function SetupScreen({ onNext }) {
     }
     setChecking(true);
     setError("");
+    const su = serverUrl.trim().replace(/\/+$/, "");
+    setServerUrl(su);
     try {
       await window.api.config.set("gamePath", gamePath);
-      await window.api.config.set("serverUrl", serverUrl);
+      await window.api.config.set("serverUrl", su);
       await window.api.config.set("username", username);
       await window.api.spt.cleanupInstaller();
-      onNext(gamePath, serverUrl, username);
+      onNext(gamePath, su, username);
     } catch (e) {
       setError(t2("err.generic", { e: e?.message ?? e }));
     } finally {
@@ -7907,7 +7900,7 @@ function SetupScreen({ onNext }) {
   ] }) });
 }
 const SKIPPED_KEY = "skippedMods";
-const DL_CONCURRENCY = 6;
+const DL_CONCURRENCY = 4;
 const keyForEntry = (m2) => `${m2.folder}/${m2.filename}`;
 const basename = (p2) => {
   const i = p2.lastIndexOf("/");
@@ -8078,6 +8071,8 @@ function LoadoutScreen({ gamePath, serverUrl, onDone }) {
   const [filter, setFilter] = reactExports.useState("all");
   const [current, setCurrent] = reactExports.useState("");
   const [progress, setProgress] = reactExports.useState(0);
+  const [done, setDone] = reactExports.useState(0);
+  const [total, setTotal] = reactExports.useState(0);
   const [errorMsg, setErrorMsg] = reactExports.useState("");
   const loadSkipped = reactExports.useCallback(async () => {
     const raw = await window.api.config.get(SKIPPED_KEY);
@@ -8159,6 +8154,8 @@ function LoadoutScreen({ gamePath, serverUrl, onDone }) {
     }
     setState("syncing");
     setProgress(0);
+    setDone(0);
+    setTotal(ops.length);
     try {
       await pool(
         ops,
@@ -8168,7 +8165,10 @@ function LoadoutScreen({ gamePath, serverUrl, onDone }) {
           if (op.kind === "dl") await window.api.mods.download(serverUrl, gamePath, op.m.folder, op.m.filename);
           else await window.api.mods.removeExtra(gamePath, op.m.folder, op.m.filename);
         },
-        (d) => setProgress(Math.round(d / ops.length * 100))
+        (d) => {
+          setDone(d);
+          setProgress(Math.round(d / ops.length * 100));
+        }
       );
       const dlKeys = new Set(toDl.map(keyForEntry));
       const rmKeys = new Set(toRm.map(keyForEntry));
@@ -8268,6 +8268,10 @@ function LoadoutScreen({ gamePath, serverUrl, onDone }) {
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "provision-txt", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "w", children: current }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+            done,
+            " / ",
+            total,
+            " · ",
             progress,
             "%"
           ] })
@@ -8409,16 +8413,6 @@ function MainScreen({ gamePath, serverUrl, username, serverOnline, sptVersion })
     ] })
   ] });
 }
-function isNewer(a, b) {
-  const pa2 = a.split(".").map((n2) => parseInt(n2, 10) || 0);
-  const pb2 = b.split(".").map((n2) => parseInt(n2, 10) || 0);
-  for (let i = 0; i < Math.max(pa2.length, pb2.length); i++) {
-    const x2 = pa2[i] || 0, y2 = pb2[i] || 0;
-    if (x2 > y2) return true;
-    if (x2 < y2) return false;
-  }
-  return false;
-}
 function gridRef(seed) {
   const n2 = (s, m2) => String(Math.floor((Math.sin(seed * s) * 0.5 + 0.5) * m2)).padStart(3, "0");
   return `37T ${n2(1.7, 900)} ${n2(3.1, 900)}`;
@@ -8434,6 +8428,8 @@ function App() {
   const [serverVer, setServerVer] = reactExports.useState(null);
   const [appVer, setAppVer] = reactExports.useState("1.1.0");
   const [settingsOpen, setSettingsOpen] = reactExports.useState(false);
+  const [ghUpdate, setGhUpdate] = reactExports.useState(null);
+  const [updPct, setUpdPct] = reactExports.useState(null);
   const audio = useAmbientAudio();
   reactExports.useEffect(() => {
     Promise.all([
@@ -8472,13 +8468,24 @@ function App() {
     setPing({ ok: null, latencyMs: -1 });
     setScreen("loadout");
   };
-  const updateAvailable = serverVer && serverVer.launcherDownloadUrl && isNewer(serverVer.latestLauncherVersion, appVer);
+  reactExports.useEffect(() => {
+    window.api.update.checkGithub().then((u2) => {
+      if (u2) setGhUpdate(u2);
+    });
+    return window.api.update.onProgress((p2) => setUpdPct(p2 < 0 ? null : p2));
+  }, []);
   const onUpdate = async () => {
-    if (!serverVer?.launcherDownloadUrl) return;
-    try {
-      await window.api.update.downloadLauncher(serverVer.launcherDownloadUrl);
-    } catch (e) {
-      console.error(e);
+    if (!ghUpdate) return;
+    if (ghUpdate.downloadUrl) {
+      setUpdPct(0);
+      try {
+        await window.api.update.downloadLauncher(ghUpdate.downloadUrl);
+      } catch (e) {
+        console.error(e);
+        setUpdPct(null);
+      }
+    } else {
+      window.api.shell.openExternal(ghUpdate.htmlUrl);
     }
   };
   const pingTxt = ping.ok === null ? t2("link.scan") : ping.ok ? `${ping.latencyMs}ms` : t2("link.nolink");
@@ -8547,14 +8554,14 @@ function App() {
           ] })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("main", { className: "stage", children: [
-          updateAvailable && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "banner", children: [
+          ghUpdate && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "banner", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dot ok" }),
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "banner-t", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "h", children: t2("banner.title") }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "s", children: t2("banner.sub", { a: serverVer.latestLauncherVersion, b: appVer }) })
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "s", children: t2("banner.sub", { a: ghUpdate.version, b: appVer }) })
             ] }),
-            serverVer.releaseNotesUrl && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn btn-sm btn-ghost", onClick: () => window.api.shell.openExternal(serverVer.releaseNotesUrl), children: t2("banner.notes") }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn btn-sm btn-primary", onClick: onUpdate, children: t2("banner.update") })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn btn-sm btn-ghost", onClick: () => window.api.shell.openExternal(ghUpdate.htmlUrl), children: t2("banner.notes") }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn btn-sm btn-primary", onClick: onUpdate, children: updPct == null ? t2("banner.update") : `${updPct}%` })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stage-inner", children: [
             screen === "loadout" && /* @__PURE__ */ jsxRuntimeExports.jsx(LoadoutScreen, { gamePath, serverUrl, onDone: () => setScreen("deploy") }),

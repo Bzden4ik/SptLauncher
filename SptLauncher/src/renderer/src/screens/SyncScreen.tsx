@@ -8,7 +8,7 @@ type SyncState = 'checking' | 'ready' | 'syncing' | 'done' | 'error'
 type Filter = 'all' | 'needs' | 'ok' | 'skipped'
 
 const SKIPPED_KEY = 'skippedMods'
-const DL_CONCURRENCY = 6
+const DL_CONCURRENCY = 4   // matches the main-process keepAlive socket cap
 const keyForEntry = (m: ModSyncEntry) => `${m.folder}/${m.filename}`
 const basename = (p: string) => { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p }
 const dirname  = (p: string) => { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(0, i) : '' }
@@ -148,6 +148,8 @@ export default function LoadoutScreen({ gamePath, serverUrl, onDone }: Props) {
   const [filter, setFilter]     = useState<Filter>('all')
   const [current, setCurrent]   = useState('')
   const [progress, setProgress] = useState(0)
+  const [done, setDone]         = useState(0)
+  const [total, setTotal]       = useState(0)
   const [errorMsg, setErrorMsg] = useState('')
 
   const loadSkipped = useCallback(async (): Promise<Set<string>> => {
@@ -222,7 +224,7 @@ export default function LoadoutScreen({ gamePath, serverUrl, onDone }: Props) {
     type Op = { kind: 'dl' | 'rm'; m: ModSyncEntry }
     const ops: Op[] = [...toDl.map(m => ({ kind: 'dl' as const, m })), ...toRm.map(m => ({ kind: 'rm' as const, m }))]
     if (!ops.length) { onDone(); return }
-    setState('syncing'); setProgress(0)
+    setState('syncing'); setProgress(0); setDone(0); setTotal(ops.length)
     try {
       await pool(ops, DL_CONCURRENCY,
         async (op) => {
@@ -230,7 +232,7 @@ export default function LoadoutScreen({ gamePath, serverUrl, onDone }: Props) {
           if (op.kind === 'dl') await window.api.mods.download(serverUrl, gamePath, op.m.folder, op.m.filename)
           else await window.api.mods.removeExtra(gamePath, op.m.folder, op.m.filename)
         },
-        (d) => setProgress(Math.round((d / ops.length) * 100)))
+        (d) => { setDone(d); setProgress(Math.round((d / ops.length) * 100)) })
       const dlKeys = new Set(toDl.map(keyForEntry))
       const rmKeys = new Set(toRm.map(keyForEntry))
       setMods(prev => prev
@@ -304,7 +306,7 @@ export default function LoadoutScreen({ gamePath, serverUrl, onDone }: Props) {
         {state === 'syncing' && (
           <div className="provision">
             <div className="provision-track"><div className="provision-fill" style={{ width: `${progress}%` }} /></div>
-            <div className="provision-txt"><span className="w">{current}</span><span>{progress}%</span></div>
+            <div className="provision-txt"><span className="w">{current}</span><span>{done} / {total} · {progress}%</span></div>
           </div>
         )}
       </div>

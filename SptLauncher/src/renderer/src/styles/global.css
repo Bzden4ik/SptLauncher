@@ -3,7 +3,10 @@
    Night reconnaissance chart × instrument panel. Cold base, single warm focus.
    ============================================================================ */
 
-@import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=Saira+Condensed:wght@500;700;800;900&family=Spline+Sans+Mono:wght@400;500;600&display=swap');
+/* Self-hosted fonts — bundled into the app so it works fully offline.
+   (Cyrillic is not in these families, so RU text falls back to a clean
+   system font: Arial Narrow / Segoe UI / Consolas — see the font stacks below.) */
+@import './fonts.css';
 
 :root {
   /* — Cold petrol base (tinted, never pure black) — */
@@ -12,8 +15,8 @@
   --bg-3:      oklch(16% 0.028 230);
 
   /* — Acetate / glass surfaces — */
-  --acetate:   oklch(18% 0.022 232 / 0.42);
-  --acetate-2: oklch(20% 0.024 230 / 0.30);
+  --acetate:   oklch(18% 0.022 232 / 0.74);
+  --acetate-2: oklch(16% 0.024 230 / 0.66);
   --solid:     oklch(15% 0.022 233);
 
   /* — Cold hairlines (pale steel) — */
@@ -70,10 +73,11 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* grain film over everything */
+/* grain film over everything — plain low-opacity overlay (no blend mode, which
+   can mis-render on some GPUs). */
 body::after {
   content: ''; position: fixed; inset: 0; z-index: 9999; pointer-events: none;
-  opacity: 0.04; mix-blend-mode: overlay;
+  opacity: 0.03;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
 }
 
@@ -157,7 +161,6 @@ body::after {
   -webkit-app-region: drag;
   background: linear-gradient(180deg, oklch(10% 0.02 236 / 0.92), oklch(9% 0.018 238 / 0.72));
   border-bottom: 1px solid var(--line);
-  backdrop-filter: blur(10px);
 }
 .tbar::after {
   content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
@@ -206,8 +209,7 @@ body::after {
   display: flex; flex-direction: column;
   padding: 18px 14px;
   border-right: 1px solid var(--line);
-  background: linear-gradient(180deg, oklch(10% 0.02 236 / 0.5), oklch(9% 0.018 238 / 0.34));
-  backdrop-filter: blur(6px);
+  background: linear-gradient(180deg, oklch(10% 0.02 236 / 0.86), oklch(9% 0.018 238 / 0.72));
 }
 .rail::after {
   content: ''; position: absolute; right: -1px; top: 12%; bottom: 12%; width: 1px;
@@ -277,8 +279,7 @@ body::after {
   padding: 11px 16px;
   background: linear-gradient(90deg, var(--amber-g), transparent 80%);
   border: 1px solid var(--amber-lo); border-left-width: 2px;
-  backdrop-filter: blur(8px);
-  animation: rise-sm var(--t2) var(--e-out) both;
+   animation: rise-sm var(--t2) var(--e-out) both;
 }
 .banner-t { flex: 1; }
 .banner-t .h { font-family: var(--f-display); font-weight: 700; font-size: 15px; letter-spacing: 0.08em; color: var(--amber); }
@@ -294,7 +295,6 @@ body::after {
   align-items: center; gap: 18px; padding: 0 18px;
   background: linear-gradient(180deg, oklch(10% 0.02 238 / 0.7), oklch(8% 0.018 240 / 0.92));
   border-top: 1px solid var(--line);
-  backdrop-filter: blur(10px);
 }
 .comms::before {
   content: ''; position: absolute; left: 0; right: 0; top: 0; height: 1px;
@@ -399,8 +399,7 @@ body::after {
 .setup { position: absolute; inset: 0; z-index: 10; display: grid; place-items: center; padding: 40px; overflow-y: auto; }
 .intake {
   position: relative; width: 560px; max-width: 94vw;
-  border: 1px solid var(--line-2); background: var(--acetate); backdrop-filter: blur(14px);
-  animation: rise var(--t3) var(--e-out) both;
+  border: 1px solid var(--line-2); background: var(--acetate);  animation: rise var(--t3) var(--e-out) both;
 }
 .intake::before, .intake::after { content: ''; position: absolute; width: 18px; height: 18px; border: 1.5px solid var(--amber); opacity: 0.7; }
 .intake::before { left: -1px; top: -1px; border-right: none; border-bottom: none; }
@@ -590,7 +589,7 @@ body::after {
    SETTINGS overlay
    ============================================================================ */
 .overlay { position: absolute; inset: 0; z-index: 50; display: grid; place-items: center; padding: 32px;
-  background: oklch(7% 0.02 240 / 0.82); backdrop-filter: blur(8px); animation: fade var(--t2) ease; }
+  background: oklch(7% 0.02 240 / 0.9); animation: fade var(--t2) ease; }
 .cfg { position: relative; width: 540px; max-width: 100%; border: 1px solid var(--line-2); background: var(--solid); animation: rise var(--t2) var(--e-out); }
 .cfg::before, .cfg::after { content: ''; position: absolute; width: 16px; height: 16px; border: 1.5px solid var(--amber); opacity: 0.7; }
 .cfg::before { left: -1px; top: -1px; border-right: none; border-bottom: none; }

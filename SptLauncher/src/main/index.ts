@@ -11,6 +11,12 @@ import axios from 'axios'
 
 const store = new Store<any>()
 
+// Force software compositing. Some users' GPU drivers mis-composite the layered
+// UI (canvas + blurs + gradients), producing a blinding white "bloom" wash. The
+// interface is lightweight, so CPU rendering stays perfectly smooth and looks
+// identical on every machine. Must be called before the app is ready.
+app.disableHardwareAcceleration()
+
 // Sync EVERY file inside BepInEx/plugins and BepInEx/patchers — dll, json, cfg,
 // asset bundles, nested folders, the lot. Only obvious OS/runtime junk is skipped.
 const IGNORE_FILES    = new Set(['desktop.ini', 'thumbs.db', '.ds_store'])
@@ -22,10 +28,29 @@ const isIgnored       = (name: string) => IGNORE_FILES.has(name.toLowerCase())
 const BLOCKED_FILES   = new Set(['fika.headless.dll'])
 const baseNameOf      = (p: string) => { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p }
 const isBlocked       = (filename: string) => BLOCKED_FILES.has(baseNameOf(filename).toLowerCase())
+
+// Build a request URL from a user-entered server address: trim it, ensure a
+// protocol, and strip trailing slashes. Without this, an address typed with a
+// trailing "/" produces "host//launcher/..." — a double slash the SPT router
+// treats as an unknown route and answers with 404.
+function apiUrl(serverUrl: string, pathPart: string): string {
+  let base = String(serverUrl ?? '').trim().replace(/\/+$/, '')
+  if (!/^https?:\/\//i.test(base)) base = 'https://' + base
+  return base + pathPart
+}
 const APP_VERSION     = app.getVersion()
 
-// SPT использует самоподписанный сертификат
-const httpsAgent = new https.Agent({ rejectUnauthorized: false })
+// SPT uses a self-signed cert. keepAlive REUSES TLS connections instead of a
+// fresh handshake per file — without it, syncing thousands of mods floods the
+// server with handshakes until it drops sockets ("socket disconnected before
+// secure TLS connection was established"). maxSockets caps how hard we hit it.
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: false,
+  keepAlive: true,
+  maxSockets: 4,
+  maxFreeSockets: 2,
+  timeout: 60_000
+})
 const axiosInstance = axios.create({ httpsAgent })
 
 // ── Local hash cache (mtime+size keyed) ────────────────────────────────────
@@ -150,7 +175,7 @@ async function launcherGet(url: string, timeout = 10000): Promise<any> {
 
 async function getServerBackendUrl(serverUrl: string): Promise<string> {
   try {
-    const data = await launcherPost(`${serverUrl}/launcher/server/connect`, {})
+    const data = await launcherPost(apiUrl(serverUrl, '/launcher/server/connect'), {})
     const payload = data?.data ?? data
     const backendUrl = payload?.backendUrl ?? payload?.BackendUrl ?? null
     if (typeof backendUrl === 'string' && backendUrl) return backendUrl
@@ -159,7 +184,7 @@ async function getServerBackendUrl(serverUrl: string): Promise<string> {
 }
 
 async function loginToServer(serverUrl: string, username: string): Promise<string> {
-  const data = await launcherPost(`${serverUrl}/launcher/profile/login`, { username, password: '' })
+  const data = await launcherPost(apiUrl(serverUrl, '/launcher/profile/login'), { username, password: '' })
   const sessionId = data?.data ?? data
   if (typeof sessionId !== 'string' || !sessionId) {
     throw new Error(`Логин не удался. Ответ: ${JSON.stringify(data)}`)
@@ -266,7 +291,7 @@ ipcMain.handle('game:launch', async (_e, gamePath: string, serverUrl: string, us
 ipcMain.handle('server:ping', async (_e, serverUrl: string) => {
   const t0 = Date.now()
   try {
-    await launcherGet(`${serverUrl}/launcher/ping`, 4000)
+    await launcherGet(apiUrl(serverUrl, '/launcher/ping'), 4000)
     return { ok: true, latencyMs: Date.now() - t0 }
   } catch { return { ok: false, latencyMs: -1 } }
 })
@@ -274,7 +299,7 @@ ipcMain.handle('server:ping', async (_e, serverUrl: string) => {
 // ── Version info (real SPT version + update gate) ──────────────────────────
 ipcMain.handle('server:version', async (_e, serverUrl: string) => {
   try {
-    const data    = await sptGet(`${serverUrl}/launcher/version`)
+    const data    = await sptGet(apiUrl(serverUrl, '/launcher/version'))
     const payload = data?.data ?? data
     return {
       sptVersion:            payload?.SptVersion            ?? payload?.sptVersion            ?? 'unknown',
@@ -294,7 +319,7 @@ ipcMain.handle('server:version', async (_e, serverUrl: string) => {
 ipcMain.handle('mods:fetchManifest', async (_e, serverUrl: string) => {
   // Large modlists (thousands of files) take the server a while to assemble on
   // a cold cache — give it generous headroom so we don't AxiosError-timeout.
-  const data    = await sptGet(`${serverUrl}/launcher/manifest`, 180_000)
+  const data    = await sptGet(apiUrl(serverUrl, '/launcher/manifest'), 180_000)
   const payload = data?.data ?? data
   // Guard: a server-side error must NOT look like an empty manifest, otherwise
   // the client would treat every local file as "extra" and wipe them.
@@ -351,16 +376,31 @@ ipcMain.handle('mods:scanLocal', async (_e, gamePath: string) => {
 // ── Download mod (server-side) ─────────────────────────────────────────────
 ipcMain.handle('mods:download', async (_e, serverUrl: string, gamePath: string, folder: string, filename: string) => {
   if (isSkipped(folder, filename) || isProtectedName(filename) || isBlocked(filename)) return true
-  const url  = `${serverUrl}/launcher/mods/${folder}/${filename}`
+  const url  = apiUrl(serverUrl, `/launcher/mods/${folder}/${filename}`)
   const dest = path.join(gamePath, 'BepInEx', folder, filename.replace(/\//g, path.sep))
 
   fs.mkdirSync(path.dirname(dest), { recursive: true })
 
-  const data    = await sptGet(url, 120_000)
-  const payload = data?.data ?? data
-  const b64     = typeof payload === 'string' ? payload : JSON.stringify(payload)
-  fs.writeFileSync(dest, Buffer.from(b64, 'base64'))
-  return true
+  // Retry transient network drops (TLS reset, socket hang-up) with exponential
+  // backoff so one hiccup doesn't fail the whole sync.
+  const MAX_RETRIES = 4
+  let lastErr: any
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const data    = await sptGet(url, 120_000)
+      const payload = data?.data ?? data
+      const b64     = typeof payload === 'string' ? payload : JSON.stringify(payload)
+      fs.writeFileSync(dest, Buffer.from(b64, 'base64'))
+      return true
+    } catch (e) {
+      lastErr = e
+      if (attempt < MAX_RETRIES) {
+        const backoff = 400 * Math.pow(2, attempt) + Math.floor(Math.random() * 250) // ~0.4→3.2s + jitter
+        await new Promise(r => setTimeout(r, backoff))
+      }
+    }
+  }
+  throw lastErr
 })
 
 // ── Remove a stale local file (present on client but no longer on server) ───
@@ -428,13 +468,52 @@ ipcMain.handle('spt:cleanupInstaller', () => {
   return true
 })
 
-// ── Launcher self-update ───────────────────────────────────────────────────
+// ── Launcher self-update (GitHub Releases) ─────────────────────────────────
+const GITHUB_REPO = 'Bzden4ik/SptLauncher'
+
+function isVersionNewer(a: string, b: string): boolean {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0)
+  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0
+    if (x > y) return true
+    if (x < y) return false
+  }
+  return false
+}
+
+// Check the repo's latest GitHub release. Returns update info only when it's
+// strictly newer than the running app — otherwise null. Soft-fails offline.
+ipcMain.handle('update:checkGithub', async () => {
+  try {
+    const resp = await axios.get(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
+      timeout: 10_000,
+      headers: { 'User-Agent': 'SptLauncher', Accept: 'application/vnd.github+json' }
+    })
+    const rel: any = resp.data
+    const tag = String(rel?.tag_name ?? '').replace(/^v/i, '').trim()
+    if (!tag || !isVersionNewer(tag, APP_VERSION)) return null
+    const asset = (rel.assets ?? []).find((a: any) => typeof a?.name === 'string' && /\.exe$/i.test(a.name))
+    return {
+      version:     tag,
+      notes:       typeof rel.body === 'string' ? rel.body : '',
+      htmlUrl:     rel.html_url ?? `https://github.com/${GITHUB_REPO}/releases`,
+      downloadUrl: asset?.browser_download_url ?? null
+    }
+  } catch {
+    return null
+  }
+})
+
 ipcMain.handle('update:downloadLauncher', async (_e, downloadUrl: string) => {
   const dest = path.join(app.getPath('userData'), 'LauncherUpdate.exe')
   const win  = BrowserWindow.getAllWindows()[0]
 
-  const resp = await axiosInstance.get(downloadUrl, {
-    responseType: 'arraybuffer', timeout: 300_000,
+  // Plain axios (validates the GitHub TLS cert) + a User-Agent (GitHub requires
+  // one). Follows the CDN redirect automatically.
+  const resp = await axios.get(downloadUrl, {
+    responseType: 'arraybuffer', timeout: 300_000, maxRedirects: 5,
+    headers: { 'User-Agent': 'SptLauncher' },
     onDownloadProgress: (evt) => {
       const pct = evt.total ? Math.round((evt.loaded / evt.total) * 100) : -1
       if (win && !win.isDestroyed()) win.webContents.send('update:progress', pct)

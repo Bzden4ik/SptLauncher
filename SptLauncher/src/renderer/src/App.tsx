@@ -17,15 +17,8 @@ interface ServerVersion {
   latestLauncherVersion: string; launcherDownloadUrl: string | null; releaseNotesUrl: string | null
 }
 
-function isNewer(a: string, b: string): boolean {
-  const pa = a.split('.').map(n => parseInt(n, 10) || 0)
-  const pb = b.split('.').map(n => parseInt(n, 10) || 0)
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const x = pa[i] || 0, y = pb[i] || 0
-    if (x > y) return true; if (x < y) return false
-  }
-  return false
-}
+interface GhUpdate { version: string; notes: string; htmlUrl: string; downloadUrl: string | null }
+
 function gridRef(seed: number): string {
   const n = (s: number, m: number) => String(Math.floor((Math.sin(seed * s) * 0.5 + 0.5) * m)).padStart(3, '0')
   return `37T ${n(1.7, 900)} ${n(3.1, 900)}`
@@ -42,6 +35,8 @@ export default function App() {
   const [serverVer,    setServerVer]    = useState<ServerVersion | null>(null)
   const [appVer,       setAppVer]       = useState('1.1.0')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [ghUpdate,     setGhUpdate]     = useState<GhUpdate | null>(null)
+  const [updPct,       setUpdPct]       = useState<number | null>(null)
 
   const audio = useAmbientAudio()
 
@@ -78,10 +73,21 @@ export default function App() {
     setPing({ ok: null, latencyMs: -1 }); setScreen('loadout')
   }
 
-  const updateAvailable = serverVer && serverVer.launcherDownloadUrl && isNewer(serverVer.latestLauncherVersion, appVer)
+  // Check GitHub Releases for a newer launcher on launch.
+  useEffect(() => {
+    window.api.update.checkGithub().then(u => { if (u) setGhUpdate(u as GhUpdate) })
+    return window.api.update.onProgress(p => setUpdPct(p < 0 ? null : p))
+  }, [])
+
   const onUpdate = async () => {
-    if (!serverVer?.launcherDownloadUrl) return
-    try { await window.api.update.downloadLauncher(serverVer.launcherDownloadUrl) } catch (e) { console.error(e) }
+    if (!ghUpdate) return
+    if (ghUpdate.downloadUrl) {
+      setUpdPct(0)
+      try { await window.api.update.downloadLauncher(ghUpdate.downloadUrl) }
+      catch (e) { console.error(e); setUpdPct(null) }
+    } else {
+      window.api.shell.openExternal(ghUpdate.htmlUrl)
+    }
   }
 
   const pingTxt = ping.ok === null ? t('link.scan') : ping.ok ? `${ping.latencyMs}ms` : t('link.nolink')
@@ -143,16 +149,17 @@ export default function App() {
             </aside>
 
             <main className="stage">
-              {updateAvailable && (
+              {ghUpdate && (
                 <div className="banner">
                   <span className="dot ok" />
                   <div className="banner-t">
                     <div className="h">{t('banner.title')}</div>
-                    <div className="s">{t('banner.sub', { a: serverVer!.latestLauncherVersion, b: appVer })}</div>
+                    <div className="s">{t('banner.sub', { a: ghUpdate.version, b: appVer })}</div>
                   </div>
-                  {serverVer!.releaseNotesUrl &&
-                    <button className="btn btn-sm btn-ghost" onClick={() => window.api.shell.openExternal(serverVer!.releaseNotesUrl!)}>{t('banner.notes')}</button>}
-                  <button className="btn btn-sm btn-primary" onClick={onUpdate}>{t('banner.update')}</button>
+                  <button className="btn btn-sm btn-ghost" onClick={() => window.api.shell.openExternal(ghUpdate.htmlUrl)}>{t('banner.notes')}</button>
+                  <button className="btn btn-sm btn-primary" onClick={onUpdate}>
+                    {updPct == null ? t('banner.update') : `${updPct}%`}
+                  </button>
                 </div>
               )}
               <div className="stage-inner" key={screen}>

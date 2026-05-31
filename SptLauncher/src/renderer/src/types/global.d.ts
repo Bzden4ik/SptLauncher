@@ -44,6 +44,7 @@ interface WindowApi {
     onDownloadProgress(cb: (pct: number) => void): () => void
   }
   update: {
+    checkGithub(): Promise<{ version: string; notes: string; htmlUrl: string; downloadUrl: string | null } | null>
     downloadLauncher(url: string): Promise<boolean>
     onProgress(cb: (pct: number) => void): () => void
   }

@@ -30,6 +30,7 @@ const crypto__namespace = /* @__PURE__ */ _interopNamespaceDefault(crypto);
 const https__namespace = /* @__PURE__ */ _interopNamespaceDefault(https);
 const zlib__namespace = /* @__PURE__ */ _interopNamespaceDefault(zlib);
 const store = new Store();
+electron.app.disableHardwareAcceleration();
 const IGNORE_FILES = /* @__PURE__ */ new Set(["desktop.ini", "thumbs.db", ".ds_store"]);
 const isIgnored = (name) => IGNORE_FILES.has(name.toLowerCase());
 const BLOCKED_FILES = /* @__PURE__ */ new Set(["fika.headless.dll"]);
@@ -38,8 +39,19 @@ const baseNameOf = (p) => {
   return i >= 0 ? p.slice(i + 1) : p;
 };
 const isBlocked = (filename) => BLOCKED_FILES.has(baseNameOf(filename).toLowerCase());
+function apiUrl(serverUrl, pathPart) {
+  let base = String(serverUrl ?? "").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(base)) base = "https://" + base;
+  return base + pathPart;
+}
 const APP_VERSION = electron.app.getVersion();
-const httpsAgent = new https__namespace.Agent({ rejectUnauthorized: false });
+const httpsAgent = new https__namespace.Agent({
+  rejectUnauthorized: false,
+  keepAlive: true,
+  maxSockets: 4,
+  maxFreeSockets: 2,
+  timeout: 6e4
+});
 const axiosInstance = axios.create({ httpsAgent });
 let hashCache = {};
 let hashCacheDirty = false;
@@ -183,7 +195,7 @@ async function launcherGet(url, timeout = 1e4) {
 }
 async function getServerBackendUrl(serverUrl) {
   try {
-    const data = await launcherPost(`${serverUrl}/launcher/server/connect`, {});
+    const data = await launcherPost(apiUrl(serverUrl, "/launcher/server/connect"), {});
     const payload = data?.data ?? data;
     const backendUrl = payload?.backendUrl ?? payload?.BackendUrl ?? null;
     if (typeof backendUrl === "string" && backendUrl) return backendUrl;
@@ -192,7 +204,7 @@ async function getServerBackendUrl(serverUrl) {
   return serverUrl;
 }
 async function loginToServer(serverUrl, username) {
-  const data = await launcherPost(`${serverUrl}/launcher/profile/login`, { username, password: "" });
+  const data = await launcherPost(apiUrl(serverUrl, "/launcher/profile/login"), { username, password: "" });
   const sessionId = data?.data ?? data;
   if (typeof sessionId !== "string" || !sessionId) {
     throw new Error(`Логин не удался. Ответ: ${JSON.stringify(data)}`);
@@ -277,7 +289,7 @@ electron.ipcMain.handle("game:launch", async (_e, gamePath, serverUrl, username)
 electron.ipcMain.handle("server:ping", async (_e, serverUrl) => {
   const t0 = Date.now();
   try {
-    await launcherGet(`${serverUrl}/launcher/ping`, 4e3);
+    await launcherGet(apiUrl(serverUrl, "/launcher/ping"), 4e3);
     return { ok: true, latencyMs: Date.now() - t0 };
   } catch {
     return { ok: false, latencyMs: -1 };
@@ -285,7 +297,7 @@ electron.ipcMain.handle("server:ping", async (_e, serverUrl) => {
 });
 electron.ipcMain.handle("server:version", async (_e, serverUrl) => {
   try {
-    const data = await sptGet(`${serverUrl}/launcher/version`);
+    const data = await sptGet(apiUrl(serverUrl, "/launcher/version"));
     const payload = data?.data ?? data;
     return {
       sptVersion: payload?.SptVersion ?? payload?.sptVersion ?? "unknown",
@@ -301,7 +313,7 @@ electron.ipcMain.handle("server:version", async (_e, serverUrl) => {
   }
 });
 electron.ipcMain.handle("mods:fetchManifest", async (_e, serverUrl) => {
-  const data = await sptGet(`${serverUrl}/launcher/manifest`, 18e4);
+  const data = await sptGet(apiUrl(serverUrl, "/launcher/manifest"), 18e4);
   const payload = data?.data ?? data;
   if (payload && typeof payload === "object" && (payload.error || payload.Error)) {
     throw new Error(String(payload.error ?? payload.Error));
@@ -346,14 +358,27 @@ electron.ipcMain.handle("mods:scanLocal", async (_e, gamePath) => {
 });
 electron.ipcMain.handle("mods:download", async (_e, serverUrl, gamePath, folder, filename) => {
   if (isSkipped(folder, filename) || isProtectedName(filename) || isBlocked(filename)) return true;
-  const url = `${serverUrl}/launcher/mods/${folder}/${filename}`;
+  const url = apiUrl(serverUrl, `/launcher/mods/${folder}/${filename}`);
   const dest = path__namespace.join(gamePath, "BepInEx", folder, filename.replace(/\//g, path__namespace.sep));
   fs__namespace.mkdirSync(path__namespace.dirname(dest), { recursive: true });
-  const data = await sptGet(url, 12e4);
-  const payload = data?.data ?? data;
-  const b64 = typeof payload === "string" ? payload : JSON.stringify(payload);
-  fs__namespace.writeFileSync(dest, Buffer.from(b64, "base64"));
-  return true;
+  const MAX_RETRIES = 4;
+  let lastErr;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const data = await sptGet(url, 12e4);
+      const payload = data?.data ?? data;
+      const b64 = typeof payload === "string" ? payload : JSON.stringify(payload);
+      fs__namespace.writeFileSync(dest, Buffer.from(b64, "base64"));
+      return true;
+    } catch (e) {
+      lastErr = e;
+      if (attempt < MAX_RETRIES) {
+        const backoff = 400 * Math.pow(2, attempt) + Math.floor(Math.random() * 250);
+        await new Promise((r) => setTimeout(r, backoff));
+      }
+    }
+  }
+  throw lastErr;
 });
 electron.ipcMain.handle("mods:removeExtra", async (_e, gamePath, folder, filename) => {
   if (folder !== "plugins" && folder !== "patchers") return false;
@@ -411,12 +436,45 @@ electron.ipcMain.handle("spt:cleanupInstaller", () => {
   if (fs__namespace.existsSync(dest)) fs__namespace.unlinkSync(dest);
   return true;
 });
+const GITHUB_REPO = "Bzden4ik/SptLauncher";
+function isVersionNewer(a, b) {
+  const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x > y) return true;
+    if (x < y) return false;
+  }
+  return false;
+}
+electron.ipcMain.handle("update:checkGithub", async () => {
+  try {
+    const resp = await axios.get(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
+      timeout: 1e4,
+      headers: { "User-Agent": "SptLauncher", Accept: "application/vnd.github+json" }
+    });
+    const rel = resp.data;
+    const tag = String(rel?.tag_name ?? "").replace(/^v/i, "").trim();
+    if (!tag || !isVersionNewer(tag, APP_VERSION)) return null;
+    const asset = (rel.assets ?? []).find((a) => typeof a?.name === "string" && /\.exe$/i.test(a.name));
+    return {
+      version: tag,
+      notes: typeof rel.body === "string" ? rel.body : "",
+      htmlUrl: rel.html_url ?? `https://github.com/${GITHUB_REPO}/releases`,
+      downloadUrl: asset?.browser_download_url ?? null
+    };
+  } catch {
+    return null;
+  }
+});
 electron.ipcMain.handle("update:downloadLauncher", async (_e, downloadUrl) => {
   const dest = path__namespace.join(electron.app.getPath("userData"), "LauncherUpdate.exe");
   const win = electron.BrowserWindow.getAllWindows()[0];
-  const resp = await axiosInstance.get(downloadUrl, {
+  const resp = await axios.get(downloadUrl, {
     responseType: "arraybuffer",
     timeout: 3e5,
+    maxRedirects: 5,
+    headers: { "User-Agent": "SptLauncher" },
     onDownloadProgress: (evt) => {
       const pct = evt.total ? Math.round(evt.loaded / evt.total * 100) : -1;
       if (win && !win.isDestroyed()) win.webContents.send("update:progress", pct);
